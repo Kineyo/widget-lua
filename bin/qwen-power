@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# ======================================================================
+#  qwen-power  –  Botón de encendido / control de Qwen Widget
+#
+#  Uso:
+#    qwen-power           (enciende si está apagado, reinicia si está encendido)
+#    qwen-power on        (enciende)
+#    qwen-power off       (apaga)
+#    qwen-power restart   (reinicia)
+# ======================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WIDGET_DIR="${QWEN_WIDGET_DIR:-$SCRIPT_DIR}"
+ACTION="${1:-toggle}"
+
+ICON="${WIDGET_DIR}/assets/icon.png"
+if [ ! -f "$ICON" ]; then
+    ICON="${WIDGET_DIR}/assets/avatar.jpg"
+fi
+
+notify() {
+    local title="$1"
+    local msg="$2"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -i "$ICON" "$title" "$msg" -t 3500 2>/dev/null || true
+    fi
+}
+
+is_running() {
+    systemctl --user is-active qwen-widget.service >/dev/null 2>&1 || pgrep -f "lua.*main.lua" >/dev/null 2>&1
+}
+
+start_widget() {
+    if is_running; then
+        notify "Qwen Widget" "⚡ El widget ya está encendido en tu pantalla."
+        return 0
+    fi
+    notify "Qwen Widget" "🟢 Encendiendo widget de escritorio..."
+    systemctl --user start qwen-widget.service 2>/dev/null || nohup "${WIDGET_DIR}/bin/qwen-widget" >/tmp/qwen-widget.log 2>&1 &
+}
+
+stop_widget() {
+    notify "Qwen Widget" "🔴 Apagando widget..."
+    systemctl --user stop qwen-widget.service 2>/dev/null || true
+    pkill -f "lua.*main.lua" 2>/dev/null || true
+}
+
+restart_widget() {
+    notify "Qwen Widget" "🔄 Reiniciando widget..."
+    systemctl --user restart qwen-widget.service 2>/dev/null || {
+        pkill -f "lua.*main.lua" 2>/dev/null || true
+        sleep 0.4
+        nohup "${WIDGET_DIR}/bin/qwen-widget" >/tmp/qwen-widget.log 2>&1 &
+    }
+}
+
+case "$ACTION" in
+    on|start|encender)
+        start_widget
+        ;;
+    off|stop|apagar)
+        stop_widget
+        ;;
+    restart|reiniciar)
+        restart_widget
+        ;;
+    toggle|*)
+        if is_running; then
+            restart_widget
+        else
+            start_widget
+        fi
+        ;;
+esac

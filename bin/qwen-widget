@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# ------------------------------------------------------------------
+# qwen-widget  –  Launcher script for Qwen-Widget daemon
+# ------------------------------------------------------------------
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WIDGET_DIR="${QWEN_WIDGET_DIR:-$SCRIPT_DIR}"
+if [ ! -f "${WIDGET_DIR}/lib/main.lua" ]; then
+    WIDGET_DIR="/opt/qwen-widget"
+fi
+
+# Lua 5.3 paths for LGI compatibility
+export LUA_PATH="/usr/share/lua/5.3/?.lua;/usr/share/lua/5.3/?/init.lua;${WIDGET_DIR}/lib/?.lua;;"
+export LUA_CPATH="/usr/lib/x86_64-linux-gnu/lua/5.3/?.so;/usr/lib/x86_64-linux-gnu/lua/5.3/?/corelgilua51.so;;"
+
+# Find lua5.3 binary
+LUA_BIN=""
+for candidate in "/opt/qwen-widget/bin/lua5.3" "${WIDGET_DIR}/bin/lua5.3" "$HOME/.local/bin/lua5.3" /usr/bin/lua5.3 /usr/local/bin/lua5.3; do
+    if [ -x "$candidate" ]; then
+        LUA_BIN="$candidate"
+        break
+    fi
+done
+
+if [ -z "$LUA_BIN" ]; then
+    echo "[qwen-widget] ERROR: lua5.3 not found. Run install.sh first." >&2
+    exit 1
+fi
+
+# Kill any existing instance
+pkill -f "lua.*main.lua" 2>/dev/null || true
+sleep 0.3
+
+export QWEN_WIDGET_DIR="$WIDGET_DIR"
+export GDK_BACKEND=x11
+
+# Run the widget
+exec "$LUA_BIN" "${WIDGET_DIR}/lib/main.lua" "$@"

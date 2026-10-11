@@ -1,0 +1,53 @@
+# ======================================================================
+# .gitignore  –  Reglas para Qwen-Widget / OpenClaw
+# Asegura que ningún dato personal, log o archivo temporal se suba a GitHub
+# ======================================================================
+
+# Credenciales, tokens y variables de entorno
+.env
+.env.*
+*.secret
+*.token
+*.key
+*credential*
+*credentials*
+*private*
+*.pem
+
+# Archivos de log y temporales
+*.log
+/tmp/
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+.cache/
+
+# Capturas de pantalla y medios personales
+captura_*.png
+Capturas/
+capturas/
+screenshots/
+qwen_image.jpg
+
+# Compilación y binarios locales
+bin/lua5.3
+lua-*/
+*.o
+*.a
+*.so
+luac.out
+__pycache__/
+*.pyc
+
+# Artefactos del sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editores y entornos de desarrollo
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
