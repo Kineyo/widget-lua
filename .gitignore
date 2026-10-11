@@ -30,6 +30,7 @@ Capturas/
 capturas/
 screenshots/
 qwen_image.jpg
+sync-to-github.sh
 
 # Compilación y binarios locales
 bin/lua5.3
