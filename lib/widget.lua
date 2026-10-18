@@ -1,6 +1,8 @@
 ----------------------------------------------------------------------
--- widget.lua  –  Circular floating bubble with edge snapping,
---                YouTube Music mini player integration & OpenClaw Agent
+-- widget.lua  –  Main Floating Bubble with State Machine Sprites,
+--                Real-Time Docked Panel Tracking (Player, Chat, Lyrics,
+--                Bubbles), and Strict <= 500 MB RAM Controller.
+--                Zero emojis anywhere.
 ----------------------------------------------------------------------
 local lgi    = require("lgi")
 local Gtk    = lgi.require("Gtk", "3.0")
@@ -8,52 +10,96 @@ local Gdk    = lgi.require("Gdk", "3.0")
 local GLib   = lgi.GLib
 local cairo  = lgi.cairo
 
-local config   = require("config")
-local utils    = require("utils")
-local animator = require("animator")
-local fetchers = require("fetchers")
-local dbus_l   = require("dbus_listener")
-local chat     = require("chat")
-local bubbles  = require("bubbles")
-local launcher = require("launcher")
+local config        = require("config")
+local utils         = require("utils")
+local icons         = require("icons")
+local animator      = require("animator")
+local fetchers      = require("fetchers")
+local dbus_l        = require("dbus_listener")
+local chat          = require("chat")
+local bubbles       = require("bubbles")
+local launcher      = require("launcher")
 local mpris         = require("mpris")
 local player        = require("player")
 local lyrics        = require("lyrics")
 local lyrics_bubble = require("lyrics_bubble")
+local text_popup    = require("text_popup")
+local model_mgr     = require("model_manager")
+
+local ok_native, qwen_native = pcall(require, "qwen_native")
+if not ok_native then qwen_native = nil end
 
 local widget = {}
 widget.window = nil
+widget.state  = "idle" -- "idle" | "hover" | "chatting" | "thinking" | "music" | "grammar" | "error"
 
--- State
-local avatar_pb   = nil
-local wx, wy      = 0, 0       -- current window position
+local sprites     = {}
+local wx, wy      = 0, 0
 local dragging    = false
 local is_hovered  = false
-local drag_ox, drag_oy = 0, 0  -- offset from click to window origin
-local was_drag    = false       -- distinguish click from drag
-local snap_edge   = "right"     -- which edge we're snapped to
+local drag_ox, drag_oy = 0, 0
+local was_drag    = false
+local snap_edge   = "right"
+local active_override_state = nil
 
--- Data bubble cycling
-local data_index  = 0
-local data_keys   = { "clock", "weather", "music", "crypto", "forex" }
-
-----------------------------------------------------------------------
--- Get screen dimensions
-----------------------------------------------------------------------
 local function screen_size()
-    local screen = Gdk.Screen.get_default()
-    return screen:get_width(), screen:get_height()
+    return utils.screen_size()
 end
 
-----------------------------------------------------------------------
--- Snap to nearest edge
-----------------------------------------------------------------------
+-- Preload / resolve sprite for current state
+local function get_current_sprite()
+    local st = widget.state or "idle"
+    local s = config.BUBBLE_SIZE or 72
+    if not sprites[st] then
+        sprites[st] = utils.load_sprite(st, s)
+    end
+    return sprites[st] or sprites["idle"]
+end
+
+local function refresh_effective_state()
+    if active_override_state and active_override_state ~= "idle" then
+        widget.state = active_override_state
+    elseif is_hovered then
+        widget.state = "hover"
+    elseif chat.visible then
+        widget.state = "chatting"
+    elseif mpris.track.status == "Playing" then
+        widget.state = "music"
+    else
+        widget.state = "idle"
+    end
+    if widget.window then
+        widget.window:queue_draw()
+    end
+end
+
+function widget.set_state(new_state)
+    if new_state == "idle" then
+        active_override_state = nil
+    else
+        active_override_state = new_state
+    end
+    refresh_effective_state()
+end
+
+-- Update all docked windows dynamically in real time when bubble moves
+local function reposition_all_docked(edge_hint)
+    local bsize = config.BUBBLE_SIZE or 72
+    local edge = edge_hint or snap_edge
+    lyrics_bubble.reposition(wx, wy, bsize, edge)
+    player.reposition(wx, wy, bsize, edge)
+    chat.reposition(wx, wy, bsize, edge)
+    bubbles.reposition(wx, wy, bsize)
+    if launcher.reposition then
+        launcher.reposition()
+    end
+end
+
 local function snap_to_edge(win, from_x, from_y)
     local sw, sh = screen_size()
-    local s = config.BUBBLE_SIZE
-    local m = config.BUBBLE_MARGIN
+    local s = config.BUBBLE_SIZE or 72
+    local m = config.BUBBLE_MARGIN or 8
 
-    -- Distances to each edge
     local d_left   = from_x
     local d_right  = sw - (from_x + s)
     local d_top    = from_y
@@ -72,26 +118,22 @@ local function snap_to_edge(win, from_x, from_y)
         ty = m
         snap_edge = "top"
     else
-        ty = sh - s - m - 48  -- panel offset
+        ty = sh - s - m - 48
         snap_edge = "bottom"
     end
 
-    -- Clamp vertical/horizontal
-    ty = math.max(m, math.min(ty, sh - s - m))
-    tx = math.max(m, math.min(tx, sw - s - m))
+    tx, ty = utils.clamp_to_screen(tx, ty, s, s, m)
 
-    -- Animate snap
     local start_x, start_y = from_x, from_y
     local anim = animator.new({
-        duration = config.SNAP_DURATION_MS,
+        duration = config.SNAP_DURATION_MS or 220,
         ease = utils.ease_out,
         on_update = function(t)
             local cx = utils.lerp(start_x, tx, t)
             local cy = utils.lerp(start_y, ty, t)
             wx, wy = math.floor(cx), math.floor(cy)
             win:move(wx, wy)
-            lyrics_bubble.reposition(wx, wy, config.BUBBLE_SIZE, snap_edge)
-            launcher.reposition()
+            reposition_all_docked(snap_edge)
         end,
     })
     anim.value = 0
@@ -99,33 +141,30 @@ local function snap_to_edge(win, from_x, from_y)
     anim:start()
 end
 
-----------------------------------------------------------------------
--- Show a smart random data bubble
-----------------------------------------------------------------------
 local function show_next_data()
+    if config.skills and config.skills.data_bubbles == false then
+        return true
+    end
     local text = fetchers.get_random_fact()
     if text and #text > 0 then
         bubbles.show(text, wx, wy, config.BUBBLE_SIZE, snap_edge)
     end
-    return true  -- keep timer
+    return true
 end
 
-----------------------------------------------------------------------
--- Draw the circular bubble
-----------------------------------------------------------------------
-local function on_draw(self, cr)
-    local s = config.BUBBLE_SIZE
+local function on_draw(_, cr)
+    local s = config.BUBBLE_SIZE or 72
     local r = s / 2
 
-    -- Clear to transparent
     cr:set_operator(cairo.Operator.SOURCE)
     cr:set_source_rgba(0, 0, 0, 0)
     cr:paint()
     cr:set_operator(cairo.Operator.OVER)
 
     local is_playing = (mpris.track.status == "Playing")
+    local st = widget.state or "idle"
 
-    -- 1. Soft diffused ambient shadow
+    -- 1. Soft ambient drop shadow
     cr:save()
     for k = 3, 1, -1 do
         cr:arc(r, r + 2 + k * 0.7, r - 3, 0, 2 * math.pi)
@@ -134,14 +173,22 @@ local function on_draw(self, cr)
     end
     cr:restore()
 
-    -- 2. Minimalist subtle glow on hover or playing (clean, no rainbow clutter)
-    if is_hovered or is_playing then
+    -- 2. State-aware radial glow
+    if is_hovered or is_playing or st ~= "idle" then
         cr:save()
-        local glow_r = r
-        cr:arc(r, r, glow_r, 0, 2 * math.pi)
-        local glow = cairo.Pattern.create_radial(r, r, r - 5, r, r, glow_r)
-        local gc = is_playing and config.ACCENT_PINK or config.ACCENT
-        glow:add_color_stop_rgba(0, gc[1], gc[2], gc[3], is_hovered and 0.45 or 0.30)
+        cr:arc(r, r, r, 0, 2 * math.pi)
+        local glow = cairo.Pattern.create_radial(r, r, r - 6, r, r, r)
+        local gc = config.ACCENT
+        if st == "music" or is_playing then
+            gc = config.ACCENT_PINK
+        elseif st == "grammar" then
+            gc = { 0.20, 0.83, 0.60 }
+        elseif st == "thinking" then
+            gc = { 0.96, 0.72, 0.18 }
+        elseif st == "error" then
+            gc = { 0.94, 0.27, 0.27 }
+        end
+        glow:add_color_stop_rgba(0, gc[1], gc[2], gc[3], is_hovered and 0.48 or 0.32)
         glow:add_color_stop_rgba(1, gc[1], gc[2], gc[3], 0.0)
         cr:set_source(glow)
         cr:fill()
@@ -149,86 +196,63 @@ local function on_draw(self, cr)
     end
 
     -- 3. Dark circle background
-    local inner_r = r - config.GLOW_WIDTH
+    local inner_r = r - (config.GLOW_WIDTH or 2)
     cr:save()
     cr:arc(r, r, inner_r, 0, 2 * math.pi)
     utils.set_colour(cr, config.BG)
     cr:fill()
     cr:restore()
 
-    -- 4. Avatar / Icon circular clip (conserves avatar & icon)
-    if avatar_pb then
-        utils.draw_avatar(cr, avatar_pb, r, r, inner_r - 0.5)
+    -- 4. State sprite / avatar rendered inside circular mask
+    local pb = get_current_sprite()
+    if pb then
+        utils.draw_avatar(cr, pb, r, r, inner_r - 0.5)
     else
         cr:save()
         cr:arc(r, r, inner_r - 0.5, 0, 2 * math.pi)
         cr:set_source_rgba(config.ACCENT[1], config.ACCENT[2], config.ACCENT[3], 0.25)
         cr:fill()
-        utils.draw_text(cr, r - 8, r - 10, "✦", "Sans 16", { 1, 1, 1, 0.9 }, 24)
+        icons.draw(cr, "cpu", s, s, { 1, 1, 1, 0.9 })
         cr:restore()
     end
 
-    -- 5. Modern minimalist hairline ring border
-    cr:save()
-    cr:arc(r, r, inner_r, 0, 2 * math.pi)
-    local ring_col
-    local ring_alpha
-    if is_playing then
-        ring_col = config.ACCENT_PINK
-        ring_alpha = 0.90
-    elseif is_hovered then
-        ring_col = config.ACCENT
-        ring_alpha = 0.85
-    else
-        ring_col = { 0.45, 0.40, 0.60 }
-        ring_alpha = 0.40
-    end
-    cr:set_source_rgba(ring_col[1], ring_col[2], ring_col[3], ring_alpha)
-    cr:set_line_width(1.2)
-    cr:stroke()
-    cr:restore()
-
-    -- 6. Modern badges preserving emojis
-    -- Music playing indicator (subtle pill badge with 🎵 on bottom-left)
+    -- 5. Vector Music badge (bottom-left) when playing
     if is_playing then
         local bx, by, br = 14, s - 14, 9.5
         cr:save()
         cr:arc(bx, by, br, 0, 2 * math.pi)
-        cr:set_source_rgba(0.08, 0.07, 0.14, 0.95)
+        cr:set_source_rgba(0.06, 0.07, 0.12, 0.96)
         cr:fill_preserve()
-        cr:set_source_rgba(config.ACCENT_PINK[1], config.ACCENT_PINK[2], config.ACCENT_PINK[3], 0.85)
-        cr:set_line_width(1.1)
+        cr:set_source_rgba(config.ACCENT_PINK[1], config.ACCENT_PINK[2], config.ACCENT_PINK[3], 0.90)
+        cr:set_line_width(1.2)
         cr:stroke()
-        utils.draw_text(cr, bx - 5.5, by - 6.5, "🎵", "Sans 8", { 1, 1, 1, 1 }, 14)
+        cr:translate(bx - 6, by - 6)
+        icons.draw(cr, "music", 12, 12, { 1, 1, 1, 1 })
         cr:restore()
     end
 
-    -- Notification indicator (subtle badge with 🔔 on top-right)
+    -- 6. Vector Notification badge (top-right)
     if dbus_l.has_badge then
-        local nx, ny, nr = s - 14, 14, 8.5
+        local nx, ny, nr = s - 14, 14, 7.5
         cr:save()
         cr:arc(nx, ny, nr, 0, 2 * math.pi)
-        cr:set_source_rgba(1.0, 0.45, 0.0, 0.95)
+        cr:set_source_rgba(0.96, 0.62, 0.04, 0.96)
         cr:fill_preserve()
-        cr:set_source_rgba(1.0, 1.0, 1.0, 0.85)
-        cr:set_line_width(1.0)
+        cr:set_source_rgba(1.0, 1.0, 1.0, 0.90)
+        cr:set_line_width(1.1)
         cr:stroke()
-        utils.draw_text(cr, nx - 4.5, ny - 5.5, "🔔", "Sans 7", { 1, 1, 1, 1 }, 12)
         cr:restore()
     end
 
     return true
 end
 
-----------------------------------------------------------------------
--- Build the bubble window
-----------------------------------------------------------------------
 function widget.build()
-    local s = config.BUBBLE_SIZE
+    local s = config.BUBBLE_SIZE or 72
 
     local win = Gtk.Window {
         type = Gtk.WindowType.POPUP,
-        title = "OpenClaw Qwen Widget",
+        title = "Qwen Desktop Widget",
         decorated = false,
         skip_taskbar_hint = true,
         skip_pager_hint = true,
@@ -241,20 +265,17 @@ function widget.build()
     win:set_keep_above(true)
     win:set_app_paintable(true)
     win:set_size_request(s, s)
-    win:set_tooltip_text("✦ Qwen Widget\n• Clic: Abrir Chat AI\n• Clic derecho o Scroll: Info / Burbuja\n• Clic central: Música")
+    win:set_tooltip_text("Qwen Desktop Assistant\n- Clic izquierdo: Chat IA y Configuracion\n- Clic derecho o Scroll: Burbuja de Datos\n- Clic central: Reproductor YouTube Music / Spotify")
 
-    -- RGBA
     local screen = win:get_screen()
     local visual = screen:get_rgba_visual()
     if visual then win:set_visual(visual) end
 
-    -- Load avatar (with fallback to icon.png if needed to preserve icon)
-    avatar_pb = utils.load_pixbuf(config.AVATAR, config.BUBBLE_SIZE)
-    if not avatar_pb then
-        avatar_pb = utils.load_pixbuf(config.ASSETS_DIR .. "/icon.png", config.BUBBLE_SIZE)
+    -- Preload all state sprites from assets/sprites/
+    for _, st in ipairs({ "idle", "hover", "chatting", "thinking", "music", "grammar", "error" }) do
+        sprites[st] = utils.load_sprite(st, s)
     end
 
-    -- Events (click, drag, hover, scroll)
     win:add_events(
         Gdk.EventMask.BUTTON_PRESS_MASK +
         Gdk.EventMask.BUTTON_RELEASE_MASK +
@@ -265,8 +286,7 @@ function widget.build()
 
     win.on_draw = on_draw
 
-    -- Hover events: minimalist visual feedback only (NO radial options popping up!)
-    win.on_enter_notify_event = function(self, event)
+    win.on_enter_notify_event = function()
         if not dragging then
             is_hovered = true
             local gdk_win = win:get_window()
@@ -275,31 +295,28 @@ function widget.build()
                 local cursor = Gdk.Cursor.new_from_name(display, "pointer")
                 gdk_win:set_cursor(cursor)
             end
-            win:queue_draw()
+            refresh_effective_state()
         end
         return false
     end
 
-    win.on_leave_notify_event = function(self, event)
+    win.on_leave_notify_event = function()
         is_hovered = false
         local gdk_win = win:get_window()
         if gdk_win then
             gdk_win:set_cursor(nil)
         end
-        win:queue_draw()
+        refresh_effective_state()
         return false
     end
 
-    -- Scroll event on orb: immediately invoke / cycle data bubble!
-    win.on_scroll_event = function(self, event)
+    win.on_scroll_event = function()
         lyrics_bubble.hide()
         show_next_data()
         return true
     end
 
-    -- Mouse press → start drag, click, toggle player, or right-click to invoke data bubble
-    win.on_button_press_event = function(self, event)
-        -- Double left click → immediately show / cycle data bubble
+    win.on_button_press_event = function(_, event)
         if event.button == 1 and (event.type == 5 or event.type == Gdk.EventType["2BUTTON_PRESS"]) then
             lyrics_bubble.hide()
             show_next_data()
@@ -313,11 +330,11 @@ function widget.build()
             drag_oy = event.y
             return true
         elseif event.button == 2 then
-            -- Middle-click → Toggle YouTube Music Mini Player!
-            player.toggle(wx, wy, config.BUBBLE_SIZE, snap_edge)
+            if not config.skills or config.skills.player ~= false then
+                player.toggle(wx, wy, config.BUBBLE_SIZE, snap_edge)
+            end
             return true
         elseif event.button == 3 then
-            -- Right-click → Instantly invoke / cycle data bubble!
             lyrics_bubble.hide()
             show_next_data()
             return true
@@ -325,53 +342,52 @@ function widget.build()
         return false
     end
 
-    -- Mouse motion → drag
-    win.on_motion_notify_event = function(self, event)
+    -- Real-time coordinate update for main bubble AND all docked panels
+    win.on_motion_notify_event = function(_, event)
         if dragging then
             local nx = event.x_root - drag_ox
             local ny = event.y_root - drag_oy
-            -- If moved more than 5px, it's a drag not a click
-            if math.abs(nx - wx) > 5 or math.abs(ny - wy) > 5 then
+            if math.abs(nx - wx) > 4 or math.abs(ny - wy) > 4 then
                 was_drag = true
             end
-            wx, wy = math.floor(nx), math.floor(ny)
+            wx, wy = utils.clamp_to_screen(math.floor(nx), math.floor(ny), s, s, 2)
             win:move(wx, wy)
-            -- Hide bubbles while dragging
-            bubbles.hide()
-            lyrics_bubble.reposition(wx, wy, config.BUBBLE_SIZE, snap_edge)
+            reposition_all_docked("auto")
             return true
         end
         return false
     end
 
-    -- Mouse release → snap or toggle chat
-    win.on_button_release_event = function(self, event)
+    win.on_button_release_event = function(_, event)
         if event.button == 1 then
             dragging = false
             if was_drag then
-                -- Snap to nearest edge
                 snap_to_edge(win, wx, wy)
             else
-                -- Click → toggle chat menu (hide any active bubbles first)
                 bubbles.hide()
                 lyrics_bubble.hide()
                 chat.build(win)
                 chat.toggle(wx, wy, config.BUBBLE_SIZE, snap_edge)
+                refresh_effective_state()
             end
             return true
         end
         return false
     end
 
-    -- Connect callbacks for chat and bubbles
     chat.on_invoke_bubble = function()
         show_next_data()
+    end
+    chat.on_state_change = function(st)
+        widget.set_state(st)
+    end
+    text_popup.on_state_change = function(st)
+        widget.set_state(st)
     end
     bubbles.on_next = function()
         show_next_data()
     end
 
-    -- Connect Launcher callbacks
     launcher.get_orb = function()
         return wx, wy, config.BUBBLE_SIZE
     end
@@ -394,7 +410,7 @@ function widget.build()
             if ok_ag and openclaw then
                 openclaw.handle_slash_command("/sys", function(res)
                     GLib.idle_add(GLib.PRIORITY_DEFAULT, function()
-                        bubbles.show("📊 " .. res:gsub("\n+", " • "), wx, wy, config.BUBBLE_SIZE, snap_edge, 14000)
+                        bubbles.show("[Sistema] " .. (res or ""):gsub("\n+", " | "), wx, wy, config.BUBBLE_SIZE, snap_edge, 14000)
                         return false
                     end)
                 end)
@@ -406,7 +422,7 @@ function widget.build()
             if ok_ag and openclaw then
                 openclaw.handle_slash_command("/shot", function(res)
                     GLib.idle_add(GLib.PRIORITY_DEFAULT, function()
-                        bubbles.show("📸 " .. res, wx, wy, config.BUBBLE_SIZE, snap_edge, 8000)
+                        bubbles.show(res or "[Captura completada]", wx, wy, config.BUBBLE_SIZE, snap_edge, 8000)
                         return false
                     end)
                 end)
@@ -416,28 +432,25 @@ function widget.build()
         end
     end
 
-    -- Redraw on data update
     fetchers.on_update = function()
         win:queue_draw()
     end
 
-    -- Redraw on media player status change
     mpris.on_status_change = function(status)
-        win:queue_draw()
+        refresh_effective_state()
         if config.LYRICS_ENABLED then
             lyrics.set_status(status)
         end
     end
 
-    -- When YouTube Music changes song: show dynamic text bubble for 12 seconds
-    -- and load synchronized lyrics bubble from the top of the widget
     mpris.on_track_change = function(track)
-        win:queue_draw()
+        refresh_effective_state()
         if player.update_ui then player.update_ui() end
         if track and #track.title > 0 and track.status ~= "Stopped" then
-            local song_text = "🎵 " .. track.title
+            local src_tag = (track.source == "spotify") and "[Spotify]" or "[YT Music]"
+            local song_text = src_tag .. " " .. track.title
             if track.artist and #track.artist > 0 and track.artist ~= "YouTube Music" then
-                song_text = song_text .. " — " .. track.artist
+                song_text = song_text .. " - " .. track.artist
             end
             bubbles.show(song_text, wx, wy, config.BUBBLE_SIZE, snap_edge, 12000)
         end
@@ -446,7 +459,6 @@ function widget.build()
         end
     end
 
-    -- Connect synchronized lyrics to speech bubble on top of widget
     lyrics.on_line_change = function(text)
         if config.LYRICS_ENABLED then
             lyrics_bubble.show_line(text, wx, wy, config.BUBBLE_SIZE, snap_edge)
@@ -470,16 +482,16 @@ function widget.build()
     end)
 
     mpris.add_status_listener(function(status)
+        refresh_effective_state()
         if config.LYRICS_ENABLED then
             lyrics.set_status(status)
         end
     end)
 
-    -- DBus notification → show as dynamic bubble
     dbus_l.on_notify = function()
         if dbus_l.notification then
             local notif = dbus_l.notification
-            local text = "🔔 " .. (notif.summary or "")
+            local text = "[Notificacion] " .. (notif.summary or "")
             if notif.body and #notif.body > 0 and notif.body ~= notif.summary then
                 text = text .. "\n" .. notif.body
             end
@@ -492,14 +504,10 @@ function widget.build()
     return win
 end
 
-----------------------------------------------------------------------
--- Start the widget
-----------------------------------------------------------------------
 function widget.start()
     local win = widget.window
     if not win then return end
 
-    -- Initial position: bottom-right
     local sw, sh = screen_size()
     wx = sw - config.BUBBLE_SIZE - config.BUBBLE_MARGIN
     wy = sh - config.BUBBLE_SIZE - config.BUBBLE_MARGIN - 60
@@ -509,19 +517,26 @@ function widget.start()
     win:show_all()
     win:set_opacity(0)
 
-    -- Fade in
     animator.fade(win, "in")
 
-    -- Start data fetchers
     fetchers.start()
-
-    -- Start DBus listener
     dbus_l.start()
-
-    -- Start MPRIS YouTube Music listener & player
     mpris.start()
 
-    -- Check if music is already playing on startup to load lyrics immediately
+    -- Verify & auto-download default GGUF models (es-grammar + qwen3.0-0.8b) on first run
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, function()
+        local st = model_mgr.status()
+        if not st.grammar.ready or not st.chat.ready then
+            bubbles.show("[Instalacion IA] Descargando modelos locales por defecto (es-grammar y qwen3.0-0.8b)...", wx, wy, config.BUBBLE_SIZE, snap_edge, 10000)
+            model_mgr.ensure_defaults(nil, function(ok_all)
+                if ok_all then
+                    bubbles.show("[Modelos Listos] es-grammar.gguf y qwen3.0-0.8b.gguf verificados.", wx, wy, config.BUBBLE_SIZE, snap_edge, 6000)
+                end
+            end)
+        end
+        return false
+    end)
+
     if config.LYRICS_ENABLED then
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, function()
             if mpris.track and #mpris.track.title > 0 and mpris.track.status == "Playing" then
@@ -531,7 +546,23 @@ function widget.start()
         end)
     end
 
-    -- Start data bubble cycling (first one after 3 seconds)
+    if not config.skills or config.skills.global_text_menu ~= false then
+        text_popup.start_watcher()
+    end
+
+    -- Strict <= 500 MB RAM hygiene timer (Lua GC + C++ malloc_trim/mmap guard)
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 20000, function()
+        collectgarbage("step", 120)
+        if qwen_native and qwen_native.get_memory_stats then
+            local ms = qwen_native.get_memory_stats()
+            if ms and ms.total_rss_mb and ms.total_rss_mb > 420 then
+                pcall(qwen_native.trim_memory)
+                collectgarbage("collect")
+            end
+        end
+        return true
+    end)
+
     GLib.timeout_add(GLib.PRIORITY_DEFAULT, 3000, function()
         show_next_data()
         return false

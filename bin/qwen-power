@@ -1,29 +1,32 @@
 #!/usr/bin/env bash
 # ======================================================================
-#  qwen-power  –  Botón de encendido / control de Qwen Widget
+#  qwen-power  –  Control de encendido y estado de Qwen Widget v2.0
 #
 #  Uso:
 #    qwen-power           (enciende si está apagado, reinicia si está encendido)
 #    qwen-power on        (enciende)
-#    qwen-power off       (apaga)
+#    qwen-power off       (apaga widget + motor llama.cpp)
 #    qwen-power restart   (reinicia)
 # ======================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WIDGET_DIR="${QWEN_WIDGET_DIR:-$SCRIPT_DIR}"
+if [ ! -f "${WIDGET_DIR}/lib/main.lua" ]; then
+    WIDGET_DIR="/opt/qwen-widget"
+fi
 ACTION="${1:-toggle}"
 
-ICON="${WIDGET_DIR}/assets/icon.png"
+ICON="${WIDGET_DIR}/assets/sprites/idle.png"
 if [ ! -f "$ICON" ]; then
-    ICON="${WIDGET_DIR}/assets/avatar.jpg"
+    ICON="${WIDGET_DIR}/assets/icon.png"
 fi
 
 notify() {
     local title="$1"
     local msg="$2"
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send -i "$ICON" "$title" "$msg" -t 3500 2>/dev/null || true
+        notify-send -i "$ICON" "$title" "$msg" -t 3000 2>/dev/null || true
     fi
 }
 
@@ -33,24 +36,25 @@ is_running() {
 
 start_widget() {
     if is_running; then
-        notify "Qwen Widget" "⚡ El widget ya está encendido en tu pantalla."
+        notify "Qwen Widget" "[ACTIVO] El widget ya se encuentra en ejecucion."
         return 0
     fi
-    notify "Qwen Widget" "🟢 Encendiendo widget de escritorio..."
+    notify "Qwen Widget" "[INICIANDO] Activando widget de escritorio..."
     systemctl --user start qwen-widget.service 2>/dev/null || nohup "${WIDGET_DIR}/bin/qwen-widget" >/tmp/qwen-widget.log 2>&1 &
 }
 
 stop_widget() {
-    notify "Qwen Widget" "🔴 Apagando widget..."
+    notify "Qwen Widget" "[DETENIENDO] Apagando widget y liberando memoria..."
     systemctl --user stop qwen-widget.service 2>/dev/null || true
     pkill -f "lua.*main.lua" 2>/dev/null || true
+    pkill -f "llama-server.*18080" 2>/dev/null || true
 }
 
 restart_widget() {
-    notify "Qwen Widget" "🔄 Reiniciando widget..."
+    notify "Qwen Widget" "[REINICIANDO] Recargando Qwen Widget..."
     systemctl --user restart qwen-widget.service 2>/dev/null || {
         pkill -f "lua.*main.lua" 2>/dev/null || true
-        sleep 0.4
+        sleep 0.35
         nohup "${WIDGET_DIR}/bin/qwen-widget" >/tmp/qwen-widget.log 2>&1 &
     }
 }

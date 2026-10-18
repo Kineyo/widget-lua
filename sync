@@ -1,0 +1,7 @@
+    ./sync-to-github.sh
+
+    # Sincronizar, sanitizar y hacer commit:
+    ./sync-to-github.sh --commit "feat: mejoras en el widget"
+
+    # Sincronizar, hacer commit y subirlo directo a GitHub:
+    ./sync-to-github.sh --commit "feat: mejoras en el widget" --push

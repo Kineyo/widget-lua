@@ -1,0 +1,55 @@
+# Maintainer: Qwen-Widget Team <dev@openclaw.local>
+pkgname=qwen-widget
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Hybrid Lua + C/C++ Desktop AI Widget with embedded llama.cpp (< 500 MB RAM), YT Music/Spotify synced lyrics, instant grammar checker & OpenClaw agent"
+arch=('x86_64')
+url="https://github.com/openclaw/qwen-widget"
+license=('MIT')
+depends=('lua53' 'lua53-lgi' 'gtk3' 'glib2' 'libx11' 'libxfixes' 'libxi' 'curl')
+makedepends=('cmake' 'gcc' 'pkgconf')
+source=()
+sha256sums=()
+
+build() {
+  cd "${startdir}/../.."
+  cmake -S . -B build-arch -DCMAKE_BUILD_TYPE=Release
+  cmake --build build-arch -j"$(nproc)"
+}
+
+package() {
+  cd "${startdir}/../.."
+  install -dm755 "${pkgdir}/opt/qwen-widget/bin"
+  install -dm755 "${pkgdir}/opt/qwen-widget/lib/native"
+  install -dm755 "${pkgdir}/opt/qwen-widget/lib/skills"
+  install -dm755 "${pkgdir}/opt/qwen-widget/assets/sprites"
+  install -dm755 "${pkgdir}/opt/qwen-widget/assets/icons"
+  install -dm755 "${pkgdir}/opt/qwen-widget/models"
+  install -dm755 "${pkgdir}/usr/bin"
+  install -dm755 "${pkgdir}/usr/share/applications"
+
+  install -m755 bin/qwen-widget "${pkgdir}/opt/qwen-widget/bin/qwen-widget"
+  install -m755 bin/qwen-power "${pkgdir}/opt/qwen-widget/bin/qwen-power"
+  [ -f bin/qwen-widget-bin ] && install -m755 bin/qwen-widget-bin "${pkgdir}/opt/qwen-widget/bin/qwen-widget-bin"
+  [ -f bin/llama-server ] && install -m755 bin/llama-server "${pkgdir}/opt/qwen-widget/bin/llama-server"
+
+  cp -a lib/*.lua "${pkgdir}/opt/qwen-widget/lib/"
+  cp -a lib/*.so "${pkgdir}/opt/qwen-widget/lib/" 2>/dev/null || true
+  cp -a lib/skills/*.lua "${pkgdir}/opt/qwen-widget/lib/skills/"
+  cp -a lib/native/* "${pkgdir}/opt/qwen-widget/lib/native/" 2>/dev/null || true
+  cp -a assets/* "${pkgdir}/opt/qwen-widget/assets/"
+
+  ln -sf /opt/qwen-widget/bin/qwen-widget "${pkgdir}/usr/bin/qwen-widget"
+  ln -sf /opt/qwen-widget/bin/qwen-power "${pkgdir}/usr/bin/qwen-power"
+
+  cat > "${pkgdir}/usr/share/applications/qwen-widget.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Qwen Widget
+Comment=Hybrid Lua + C/C++ Desktop AI Widget with llama.cpp and OpenClaw
+Exec=/opt/qwen-widget/bin/qwen-widget
+Icon=/opt/qwen-widget/assets/sprites/idle.png
+Terminal=false
+Categories=Utility;
+EOF
+}

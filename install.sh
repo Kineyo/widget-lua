@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # ======================================================================
-#  install.sh  –  Qwen-Widget Installer for Pop!_OS 24.04 LTS
+#  install.sh  –  Qwen-Widget v2.0 Hybrid Installer (Pop!_OS / Debian / Ubuntu)
 #
 #  Strategy:
-#    1. Check / install system deps via apt (needs sudo)
-#    2. Build Lua 5.3 locally if not found (LGI needs 5.3, not 5.4)
-#    3. Copy everything to /opt/qwen-widget/ (needs sudo)
-#    4. Create autostart .desktop in ~/.config/autostart/
+#    1. Verify / install system dependencies (GTK3, LGI, X11, GLib, curl)
+#    2. Ensure Lua 5.3 runtime and C/C++ native extensions (qwen_native.so)
+#    3. Ensure embedded llama.cpp runtime and default GGUF models
+#       (es-grammar.gguf & qwen3.0-0.8b.gguf) with progress & GGUF check
+#    4. Install embedded bundle into /opt/qwen-widget/ (or ~/.local/share/qwen-widget)
+#    5. Configure desktop entry and autostart
 # ======================================================================
 set -euo pipefail
 
-# Colours
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -19,19 +20,25 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-INSTALL_DIR="/opt/qwen-widget"
+INSTALL_DIR="${QWEN_INSTALL_DIR:-/opt/qwen-widget}"
 AUTOSTART_DIR="${HOME}/.config/autostart"
+APPS_DIR="${HOME}/.local/share/applications"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LUA_VERSION="5.3.6"
 LUA_URL="https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz"
 
-# ------------------------------------------------------------------
+ES_GRAMMAR_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+QWEN3_08B_URL="https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"
+LLAMA_RELEASE_URL="https://github.com/ggml-org/llama.cpp/releases/download/b5092/llama-b5092-bin-ubuntu-x64.zip"
+
+export PATH="$HOME/.local/bin:$PATH"
+
 banner() {
     echo -e "${PURPLE}"
-    echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║        ✦  Qwen-Widget Installer  ✦       ║"
-    echo "  ║    Desktop Widget for Pop!_OS 24.04      ║"
-    echo "  ╚══════════════════════════════════════════╝"
+    echo "  +================================================+"
+    echo "  |     Qwen-Widget v2.0 Hybrid Native Installer   |"
+    echo "  |   Lua 5.3 + C++17 + llama.cpp (< 500 MB RAM)   |"
+    echo "  +================================================+"
     echo -e "${NC}"
 }
 
@@ -40,39 +47,50 @@ ok()    { echo -e "  ${GREEN}[  OK]${NC}  $*"; }
 warn()  { echo -e "  ${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "  ${RED}[FAIL]${NC}  $*"; exit 1; }
 
-# ------------------------------------------------------------------
-check_system_deps() {
-    info "Verificando dependencias del sistema..."
-
-    local PKGS_NEEDED=()
-
-    dpkg -s lua-lgi             &>/dev/null || PKGS_NEEDED+=("lua-lgi")
-    dpkg -s gir1.2-gtk-3.0      &>/dev/null || PKGS_NEEDED+=("gir1.2-gtk-3.0")
-    dpkg -s gir1.2-gdkpixbuf-2.0 &>/dev/null || PKGS_NEEDED+=("gir1.2-gdkpixbuf-2.0")
-    dpkg -s gir1.2-pango-1.0    &>/dev/null || PKGS_NEEDED+=("gir1.2-pango-1.0")
-    dpkg -s liblua5.3-0         &>/dev/null || PKGS_NEEDED+=("liblua5.3-0")
-    command -v curl              &>/dev/null || PKGS_NEEDED+=("curl")
-    command -v gcc               &>/dev/null || PKGS_NEEDED+=("gcc")
-    dpkg -s make                 &>/dev/null || PKGS_NEEDED+=("make")
-
-    if [ ${#PKGS_NEEDED[@]} -gt 0 ]; then
-        warn "Paquetes faltantes: ${PKGS_NEEDED[*]}"
-        info "Instalando dependencias con apt..."
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq "${PKGS_NEEDED[@]}"
-        ok "Dependencias instaladas."
+SUDO=""
+setup_privilege() {
+    if [ "$(id -u)" -eq 0 ]; then
+        SUDO=""
+    elif sudo -n true 2>/dev/null; then
+        SUDO="sudo"
     else
-        ok "Todas las dependencias están presentes."
+        info "Verificando permisos de administrador para ${INSTALL_DIR}..."
+        if sudo -v 2>/dev/null; then
+            SUDO="sudo"
+        else
+            warn "Sin acceso sudo; instalando en directorio de usuario ~/.local/share/qwen-widget"
+            INSTALL_DIR="${HOME}/.local/share/qwen-widget"
+            SUDO=""
+        fi
     fi
 }
 
-# ------------------------------------------------------------------
-ensure_lua53() {
-    info "Verificando Lua 5.3..."
+check_system_deps() {
+    info "Verificando dependencias del sistema..."
+    local PKGS_NEEDED=()
+    dpkg -s lua-lgi              &>/dev/null || PKGS_NEEDED+=("lua-lgi")
+    dpkg -s gir1.2-gtk-3.0       &>/dev/null || PKGS_NEEDED+=("gir1.2-gtk-3.0")
+    dpkg -s gir1.2-gdkpixbuf-2.0 &>/dev/null || PKGS_NEEDED+=("gir1.2-gdkpixbuf-2.0")
+    dpkg -s gir1.2-pango-1.0     &>/dev/null || PKGS_NEEDED+=("gir1.2-pango-1.0")
+    dpkg -s liblua5.3-0          &>/dev/null || PKGS_NEEDED+=("liblua5.3-0")
+    command -v curl              &>/dev/null || PKGS_NEEDED+=("curl")
+    command -v g++               &>/dev/null || PKGS_NEEDED+=("g++")
+    dpkg -s make                 &>/dev/null || PKGS_NEEDED+=("make")
 
-    # Check if lua5.3 binary exists somewhere usable
+    if [ ${#PKGS_NEEDED[@]} -gt 0 ] && [ -n "$SUDO" ]; then
+        warn "Instalando paquetes faltantes: ${PKGS_NEEDED[*]}"
+        $SUDO apt-get update -qq
+        $SUDO apt-get install -y -qq "${PKGS_NEEDED[@]}"
+        ok "Dependencias del sistema instaladas."
+    else
+        ok "Dependencias del sistema verificadas."
+    fi
+}
+
+ensure_lua53() {
+    info "Verificando runtime Lua 5.3..."
     local LUA_BIN=""
-    for candidate in /usr/bin/lua5.3 /usr/local/bin/lua5.3 "$HOME/.local/bin/lua5.3"; do
+    for candidate in "${SCRIPT_DIR}/bin/lua5.3" "/opt/qwen-widget/bin/lua5.3" "$HOME/.local/bin/lua5.3" /usr/bin/lua5.3 /usr/local/bin/lua5.3; do
         if [ -x "$candidate" ]; then
             LUA_BIN="$candidate"
             break
@@ -80,33 +98,24 @@ ensure_lua53() {
     done
 
     if [ -n "$LUA_BIN" ]; then
-        # Verify it can load LGI
         if "$LUA_BIN" -e "
             package.path='/usr/share/lua/5.3/?.lua;/usr/share/lua/5.3/?/init.lua;'..package.path
             package.cpath='/usr/lib/x86_64-linux-gnu/lua/5.3/?.so;/usr/lib/x86_64-linux-gnu/lua/5.3/?/corelgilua51.so;'..package.cpath
             require('lgi')
         " &>/dev/null; then
-            ok "Lua 5.3 con LGI funcional: $LUA_BIN"
+            ok "Lua 5.3 + LGI operativo: $LUA_BIN"
             return 0
-        else
-            warn "Lua 5.3 encontrado pero LGI no carga. Recompilando..."
         fi
     fi
 
-    # Build Lua 5.3 from source (needs -Wl,-E to export symbols for LGI)
-    info "Compilando Lua ${LUA_VERSION} desde fuente..."
+    info "Compilando Lua ${LUA_VERSION} con simbolos exportados (-Wl,-E)..."
     local BUILD_DIR
     BUILD_DIR="$(mktemp -d)"
-
     (
         cd "$BUILD_DIR"
         curl -sL "$LUA_URL" -o lua.tar.gz
         tar xzf lua.tar.gz
-        cd "lua-${LUA_VERSION}"
-
-        # Build with exported symbols (-Wl,-E) so .so modules can bind
-        make clean 2>/dev/null || true
-        cd src
+        cd "lua-${LUA_VERSION}/src"
         gcc -std=gnu99 -O2 -Wall -DLUA_COMPAT_5_2 -DLUA_USE_POSIX -DLUA_USE_DLOPEN -c \
             lapi.c lcode.c lctype.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c \
             lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c \
@@ -122,174 +131,221 @@ ensure_lua53() {
         gcc -std=gnu99 -o lua lua.o liblua.a -lm -ldl -Wl,-E
     ) 2>&1 | tail -5
 
-    # Install to user local bin
     mkdir -p "$HOME/.local/bin"
     cp "${BUILD_DIR}/lua-${LUA_VERSION}/src/lua" "$HOME/.local/bin/lua5.3"
     chmod 755 "$HOME/.local/bin/lua5.3"
-
-    # Clean up
     rm -rf "$BUILD_DIR"
+    ok "Lua 5.3 compilado en $HOME/.local/bin/lua5.3"
+}
 
-    # Verify
-    if "$HOME/.local/bin/lua5.3" -e "
-        package.path='/usr/share/lua/5.3/?.lua;/usr/share/lua/5.3/?/init.lua;'..package.path
-        package.cpath='/usr/lib/x86_64-linux-gnu/lua/5.3/?.so;/usr/lib/x86_64-linux-gnu/lua/5.3/?/corelgilua51.so;'..package.cpath
-        require('lgi')
-    " &>/dev/null; then
-        ok "Lua 5.3 compilado y LGI verificado: $HOME/.local/bin/lua5.3"
+build_native_cpp() {
+    info "Verificando capa nativa C/C++ (qwen_native.so + libqwen_mmap_guard.so)..."
+    if [ -f "${SCRIPT_DIR}/CMakeLists.txt" ] && command -v cmake &>/dev/null; then
+        mkdir -p "${SCRIPT_DIR}/build"
+        cmake -S "${SCRIPT_DIR}" -B "${SCRIPT_DIR}/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+        cmake --build "${SCRIPT_DIR}/build" -j"$(nproc 2>/dev/null || echo 2)" >/dev/null
+        ok "Modulos C/C++ compilados con CMake."
+    elif [ -f "${SCRIPT_DIR}/lib/qwen_native.so" ] && [ -f "${SCRIPT_DIR}/lib/libqwen_mmap_guard.so" ]; then
+        ok "Modulos C/C++ precompilados presentes."
     else
-        fail "No se pudo verificar LGI con Lua 5.3 compilado."
+        info "Compilando modulos C/C++ directamente con g++/gcc..."
+        g++ -std=c++17 -O2 -fPIC -shared "${SCRIPT_DIR}/src/qwen_native.cpp" \
+            -I"${SCRIPT_DIR}/src/include" \
+            $(pkg-config --cflags --libs glib-2.0 gio-2.0 x11 xfixes xi) \
+            -lpthread -ldl -o "${SCRIPT_DIR}/lib/qwen_native.so"
+        gcc -O2 -fPIC -shared "${SCRIPT_DIR}/src/qwen_mmap_guard.c" \
+            -lpthread -o "${SCRIPT_DIR}/lib/libqwen_mmap_guard.so"
+        g++ -std=c++17 -O2 "${SCRIPT_DIR}/src/qwen_runner.cpp" -o "${SCRIPT_DIR}/bin/qwen-widget-bin"
+        ok "Modulos C/C++ compilados."
     fi
 }
 
-# ------------------------------------------------------------------
+ensure_llama_cpp() {
+    info "Verificando motor embebido llama.cpp..."
+    if [ -x "${SCRIPT_DIR}/bin/llama-server" ] && [ -f "${SCRIPT_DIR}/lib/native/libllama.so" ]; then
+        ok "Motor llama.cpp embebido presente."
+        return 0
+    fi
+
+    info "Descargando binarios precompilados de llama.cpp..."
+    mkdir -p "${SCRIPT_DIR}/bin" "${SCRIPT_DIR}/lib/native"
+    local TMP_ZIP
+    TMP_ZIP="$(mktemp -d)"
+    curl -L --progress-bar "$LLAMA_RELEASE_URL" -o "${TMP_ZIP}/llama.zip"
+    python3 -c "import zipfile; zipfile.ZipFile('${TMP_ZIP}/llama.zip').extractall('${TMP_ZIP}/out')"
+    cp -f "${TMP_ZIP}/out/build/bin/llama-server" "${SCRIPT_DIR}/bin/llama-server"
+    chmod 755 "${SCRIPT_DIR}/bin/llama-server"
+    cp -a "${TMP_ZIP}/out/build/bin/lib"*.so* "${SCRIPT_DIR}/lib/native/"
+    rm -rf "$TMP_ZIP"
+    ok "Motor llama.cpp descargado e integrado."
+}
+
+verify_gguf_file() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    local size
+    size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+    [ "$size" -gt 10485760 ] || return 1
+    local magic
+    magic=$(head -c 4 "$file" | tr -d '\0')
+    [ "$magic" = "GGUF" ] || return 1
+    return 0
+}
+
+ensure_default_models() {
+    info "Verificando modelos GGUF por defecto (es-grammar y qwen3.0-0.8b)..."
+    mkdir -p "${SCRIPT_DIR}/models"
+
+    local GRAMMAR_FILE="${SCRIPT_DIR}/models/es-grammar.gguf"
+    if verify_gguf_file "$GRAMMAR_FILE"; then
+        ok "Modelo gramatical verificado: models/es-grammar.gguf"
+    else
+        info "Descargando modelo por defecto: es-grammar.gguf..."
+        curl -L --progress-bar "$ES_GRAMMAR_URL" -o "${GRAMMAR_FILE}.part"
+        mv "${GRAMMAR_FILE}.part" "$GRAMMAR_FILE"
+        verify_gguf_file "$GRAMMAR_FILE" || fail "Integridad GGUF invalida en es-grammar.gguf"
+        ok "Descargado y verificado: es-grammar.gguf"
+    fi
+
+    local CHAT_FILE="${SCRIPT_DIR}/models/qwen3.0-0.8b.gguf"
+    if verify_gguf_file "$CHAT_FILE"; then
+        ok "Modelo conversacional verificado: models/qwen3.0-0.8b.gguf"
+    else
+        info "Descargando modelo por defecto: qwen3.0-0.8b.gguf..."
+        curl -L --progress-bar "$QWEN3_08B_URL" -o "${CHAT_FILE}.part"
+        mv "${CHAT_FILE}.part" "$CHAT_FILE"
+        verify_gguf_file "$CHAT_FILE" || fail "Integridad GGUF invalida en qwen3.0-0.8b.gguf"
+        ok "Descargado y verificado: qwen3.0-0.8b.gguf"
+    fi
+}
+
 install_files() {
-    info "Instalando archivos en ${INSTALL_DIR}..."
+    info "Instalando paquete completo en ${INSTALL_DIR}..."
 
-    sudo mkdir -p "${INSTALL_DIR}/bin"
-    sudo mkdir -p "${INSTALL_DIR}/lib"
-    sudo mkdir -p "${INSTALL_DIR}/assets"
+    $SUDO mkdir -p "${INSTALL_DIR}/bin"
+    $SUDO mkdir -p "${INSTALL_DIR}/lib/native"
+    $SUDO mkdir -p "${INSTALL_DIR}/lib/skills"
+    $SUDO mkdir -p "${INSTALL_DIR}/assets/sprites"
+    $SUDO mkdir -p "${INSTALL_DIR}/assets/icons"
+    $SUDO mkdir -p "${INSTALL_DIR}/models"
 
-    # Copy Lua modules
-    sudo cp "${SCRIPT_DIR}/lib/"*.lua "${INSTALL_DIR}/lib/"
-    ok "Módulos Lua copiados."
+    # Copy Lua modules, C/C++ shared libs, and native llama.cpp libs
+    $SUDO cp -r "${SCRIPT_DIR}/lib/"* "${INSTALL_DIR}/lib/"
+    ok "Modulos Lua + librerias C/C++ copiados."
 
-    # Copy launcher script
-    sudo cp "${SCRIPT_DIR}/bin/qwen-widget" "${INSTALL_DIR}/bin/qwen-widget"
-    sudo chmod 755 "${INSTALL_DIR}/bin/qwen-widget"
-    ok "Launcher instalado."
+    # Copy binaries
+    $SUDO cp "${SCRIPT_DIR}/bin/qwen-widget" "${INSTALL_DIR}/bin/qwen-widget"
+    $SUDO cp "${SCRIPT_DIR}/bin/qwen-power" "${INSTALL_DIR}/bin/qwen-power"
+    [ -f "${SCRIPT_DIR}/bin/qwen-widget-bin" ] && $SUDO cp "${SCRIPT_DIR}/bin/qwen-widget-bin" "${INSTALL_DIR}/bin/qwen-widget-bin"
+    [ -f "${SCRIPT_DIR}/bin/llama-server" ] && $SUDO cp "${SCRIPT_DIR}/bin/llama-server" "${INSTALL_DIR}/bin/llama-server"
+    $SUDO chmod 755 "${INSTALL_DIR}/bin/"*
 
-    # Copy lua5.3 binary into install dir for portability
+    # Bundle lua5.3 binary
     local LUA_SRC=""
-    for candidate in "$HOME/.local/bin/lua5.3" /usr/bin/lua5.3 /usr/local/bin/lua5.3; do
+    for candidate in "$HOME/.local/bin/lua5.3" "${SCRIPT_DIR}/bin/lua5.3" /usr/bin/lua5.3 /usr/local/bin/lua5.3; do
         if [ -x "$candidate" ]; then
             LUA_SRC="$candidate"
             break
         fi
     done
-    if [ -n "$LUA_SRC" ]; then
-        sudo cp "$LUA_SRC" "${INSTALL_DIR}/bin/lua5.3"
-        sudo chmod 755 "${INSTALL_DIR}/bin/lua5.3"
-        ok "Lua 5.3 bundled en ${INSTALL_DIR}/bin/lua5.3"
+    if [ -n "$LUA_SRC" ] && [ "$LUA_SRC" != "${INSTALL_DIR}/bin/lua5.3" ]; then
+        $SUDO cp "$LUA_SRC" "${INSTALL_DIR}/bin/lua5.3"
+        $SUDO chmod 755 "${INSTALL_DIR}/bin/lua5.3"
     fi
 
-    # Copy assets
-    if [ -d "${SCRIPT_DIR}/assets" ]; then
-        sudo cp -r "${SCRIPT_DIR}/assets/"* "${INSTALL_DIR}/assets/" 2>/dev/null || true
-        ok "Assets copiados."
+    # Copy assets (sprites + icons + avatar)
+    $SUDO cp -r "${SCRIPT_DIR}/assets/"* "${INSTALL_DIR}/assets/" 2>/dev/null || true
+    ok "Assets y sprites de estado copiados."
+
+    # Copy GGUF models
+    if [ -d "${SCRIPT_DIR}/models" ]; then
+        for mf in "${SCRIPT_DIR}/models/"*.gguf; do
+            if [ -f "$mf" ]; then
+                $SUDO cp -u "$mf" "${INSTALL_DIR}/models/"
+            fi
+        done
+        ok "Modelos GGUF instalados en ${INSTALL_DIR}/models/."
     fi
 
-    # Symlink for CLI
-    sudo ln -sf "${INSTALL_DIR}/bin/qwen-widget" /usr/local/bin/qwen-widget 2>/dev/null || true
-    ok "Symlink: /usr/local/bin/qwen-widget"
-
-    # Permissions
-    sudo chown -R root:root "${INSTALL_DIR}"
-    sudo chmod -R 755 "${INSTALL_DIR}"
-    sudo chmod 644 "${INSTALL_DIR}/lib/"*.lua
-    sudo chmod 644 "${INSTALL_DIR}/assets/"* 2>/dev/null || true
+    if [ -n "$SUDO" ]; then
+        $SUDO ln -sf "${INSTALL_DIR}/bin/qwen-widget" /usr/local/bin/qwen-widget 2>/dev/null || true
+        $SUDO ln -sf "${INSTALL_DIR}/bin/qwen-power" /usr/local/bin/qwen-power 2>/dev/null || true
+    else
+        mkdir -p "$HOME/.local/bin"
+        ln -sf "${INSTALL_DIR}/bin/qwen-widget" "$HOME/.local/bin/qwen-widget"
+        ln -sf "${INSTALL_DIR}/bin/qwen-power" "$HOME/.local/bin/qwen-power"
+    fi
 }
 
-# ------------------------------------------------------------------
 setup_autostart() {
-    info "Configurando autostart..."
-
-    mkdir -p "${AUTOSTART_DIR}"
+    info "Configurando entrada de escritorio y autostart..."
+    mkdir -p "${AUTOSTART_DIR}" "${APPS_DIR}"
 
     cat > "${AUTOSTART_DIR}/qwen-widget.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Qwen Widget
-Comment=Floating desktop widget with Ollama chat, weather, crypto & notifications
+Comment=Hybrid Lua + C/C++ Desktop AI Widget with llama.cpp and OpenClaw
 Exec=${INSTALL_DIR}/bin/qwen-widget
-Icon=${INSTALL_DIR}/assets/avatar.jpg
+Icon=${INSTALL_DIR}/assets/sprites/idle.png
 Terminal=false
 StartupNotify=false
 Categories=Utility;
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=3
+X-GNOME-Autostart-Delay=2
 EOF
 
-    ok "Autostart: ${AUTOSTART_DIR}/qwen-widget.desktop"
+    cp "${AUTOSTART_DIR}/qwen-widget.desktop" "${APPS_DIR}/qwen-widget.desktop" 2>/dev/null || true
+    ok "Autostart configurado en ${AUTOSTART_DIR}/qwen-widget.desktop"
 }
 
-# ------------------------------------------------------------------
 verify_install() {
-    info "Verificando instalación..."
+    info "Verificando instalacion..."
     local errors=0
+    [ -x "${INSTALL_DIR}/bin/qwen-widget" ]       || { warn "Falta bin/qwen-widget"; ((errors++)); }
+    [ -x "${INSTALL_DIR}/bin/llama-server" ]      || { warn "Falta bin/llama-server"; ((errors++)); }
+    [ -f "${INSTALL_DIR}/lib/qwen_native.so" ]    || { warn "Falta lib/qwen_native.so"; ((errors++)); }
+    [ -f "${INSTALL_DIR}/lib/libqwen_mmap_guard.so" ] || { warn "Falta lib/libqwen_mmap_guard.so"; ((errors++)); }
+    [ -f "${INSTALL_DIR}/lib/main.lua" ]          || { warn "Falta lib/main.lua"; ((errors++)); }
+    [ -f "${INSTALL_DIR}/lib/ai_engine.lua" ]     || { warn "Falta lib/ai_engine.lua"; ((errors++)); }
+    [ -f "${INSTALL_DIR}/lib/model_manager.lua" ] || { warn "Falta lib/model_manager.lua"; ((errors++)); }
+    [ -f "${INSTALL_DIR}/assets/sprites/idle.png" ] || { warn "Falta assets/sprites/idle.png"; ((errors++)); }
+    [ -f "${INSTALL_DIR}/models/es-grammar.gguf" ] || { warn "Falta models/es-grammar.gguf"; ((errors++)); }
+    [ -f "${INSTALL_DIR}/models/qwen3.0-0.8b.gguf" ] || { warn "Falta models/qwen3.0-0.8b.gguf"; ((errors++)); }
 
-    [ -x "${INSTALL_DIR}/bin/qwen-widget" ] || { warn "Falta bin/qwen-widget"; ((errors++)); }
-    [ -x "${INSTALL_DIR}/bin/lua5.3" ]      || { warn "Falta bin/lua5.3"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/main.lua" ]     || { warn "Falta lib/main.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/widget.lua" ]   || { warn "Falta lib/widget.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/chat.lua" ]     || { warn "Falta lib/chat.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/config.lua" ]   || { warn "Falta lib/config.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/fetchers.lua" ] || { warn "Falta lib/fetchers.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/ollama.lua" ]   || { warn "Falta lib/ollama.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/player.lua" ]   || { warn "Falta lib/player.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/lyrics.lua" ]   || { warn "Falta lib/lyrics.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/lyrics_bubble.lua" ] || { warn "Falta lib/lyrics_bubble.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/mpris.lua" ]    || { warn "Falta lib/mpris.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/lib/openclaw_agent.lua" ] || { warn "Falta lib/openclaw_agent.lua"; ((errors++)); }
-    [ -f "${INSTALL_DIR}/assets/avatar.jpg" ]|| { warn "Falta assets/avatar.jpg"; ((errors++)); }
-    [ -f "${AUTOSTART_DIR}/qwen-widget.desktop" ] || { warn "Falta autostart .desktop"; ((errors++)); }
-
-    if [ $errors -eq 0 ]; then
-        ok "Verificación completa — 0 errores."
+    if [ "$errors" -eq 0 ]; then
+        ok "Verificacion completa: 0 errores."
     else
-        warn "Se encontraron ${errors} problema(s)."
+        warn "Se encontraron ${errors} advertencia(s)."
     fi
 }
 
-# ------------------------------------------------------------------
 print_summary() {
     echo ""
-    echo -e "${GREEN}  ╔══════════════════════════════════════════════╗"
-    echo -e "  ║        ✦  Instalación Completada  ✦          ║"
-    echo -e "  ╚══════════════════════════════════════════════╝${NC}"
+    echo -e "${GREEN}  +================================================+"
+    echo -e "  |         Instalacion Completada con Exito       |"
+    echo -e "  +================================================+${NC}"
     echo ""
     echo -e "  ${CYAN}Directorio:${NC}    ${INSTALL_DIR}/"
     echo -e "  ${CYAN}Ejecutable:${NC}    ${INSTALL_DIR}/bin/qwen-widget"
-    echo -e "  ${CYAN}Lua 5.3:${NC}       ${INSTALL_DIR}/bin/lua5.3"
-    echo -e "  ${CYAN}Autostart:${NC}     ${AUTOSTART_DIR}/qwen-widget.desktop"
-    echo -e "  ${CYAN}Modelo:${NC}        ${QWEN_MODEL:-qwen3:0.6b}"
-    echo ""
-    echo -e "  ${BOLD}${YELLOW}Uso:${NC}"
-    echo -e "    Ejecutar ahora:     ${GREEN}qwen-widget${NC}"
-    echo -e "    O reiniciar sesión para autostart."
-    echo ""
-    echo -e "  ${BOLD}${YELLOW}Controles:${NC}"
-    echo -e "    Click izquierdo     Abrir/cerrar chat OpenClaw"
-    echo -e "    Click central       Desplegar reproductor YouTube Music"
-    echo -e "    Arrastrar           Mover widget (snap a bordes de pantalla)"
-    echo -e "    Click derecho       Cerrar widget"
-    echo ""
-    echo -e "  ${BOLD}${YELLOW}Ollama:${NC}"
-    echo -e "    ollama serve"
-    echo -e "    ollama pull qwen3:0.6b"
-    echo -e "    QWEN_MODEL=qwen3:4b qwen-widget    ${CYAN}# modelo alternativo${NC}"
-    echo ""
-    echo -e "  ${BOLD}${YELLOW}Desinstalar:${NC}"
-    echo -e "    sudo rm -rf ${INSTALL_DIR}"
-    echo -e "    rm ${AUTOSTART_DIR}/qwen-widget.desktop"
-    echo -e "    sudo rm /usr/local/bin/qwen-widget"
+    echo -e "  ${CYAN}Motor IA:${NC}      llama.cpp embebido (presupuesto estricto <= 500 MB RAM)"
+    echo -e "  ${CYAN}Modelos:${NC}       es-grammar.gguf (Gramatica) | qwen3.0-0.8b.gguf (Chat)"
     echo ""
 }
 
-# ==================================================================
-# Main
-# ==================================================================
 banner
-
 if [ ! -f "${SCRIPT_DIR}/lib/main.lua" ]; then
-    fail "No se encontró lib/main.lua. Ejecuta install.sh desde el directorio del proyecto."
+    fail "No se encontro lib/main.lua. Ejecuta install.sh desde la raiz del proyecto."
 fi
 
+setup_privilege
 check_system_deps
 ensure_lua53
+build_native_cpp
+ensure_llama_cpp
+ensure_default_models
 install_files
 setup_autostart
 verify_install
 print_summary
-
 exit 0

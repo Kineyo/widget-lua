@@ -1,10 +1,7 @@
 ----------------------------------------------------------------------
--- lyrics_bubble.lua  –  Floating Speech Bubble for YouTube Music Lyrics
---                       ALWAYS VERTICAL: ARRIBA (above) or ABAJO (below).
---                       - ARRIBA (default) → arrow at bottom points DOWN (⬇) to avatar
---                       - ABAJO (top edge)  → arrow at top points UP (⬆) to avatar
---                       Never appears at the sides, leaving left & right
---                       clear for general data messages (weather, clock, etc).
+-- lyrics_bubble.lua  –  Floating Speech Bubble for Synchronized Lyrics
+--                       Supports YouTube Music & Spotify. Zero emojis.
+--                       Smooth real-time coordinate tracking & clamping.
 ----------------------------------------------------------------------
 local lgi        = require("lgi")
 local Gtk        = lgi.require("Gtk", "3.0")
@@ -19,7 +16,6 @@ local utils      = require("utils")
 
 local lyrics_bubble = {}
 
--- State
 local bubble_win      = nil
 local fade_timer      = nil
 local current_opacity = 0
@@ -31,39 +27,28 @@ local current_edge    = "bottom"
 local current_tx      = 0
 local current_ty      = 0
 
--- Position cache
 local last_wx, last_wy = 0, 0
 local last_bsize       = config.BUBBLE_SIZE or 72
 local last_snap_edge   = "bottom"
 
--- Measurement context
 local measure_surf = cairo.ImageSurface(cairo.Format.ARGB32, 1, 1)
 local measure_cr   = cairo.Context(measure_surf)
 
-----------------------------------------------------------------------
--- XML escape helper for Pango
-----------------------------------------------------------------------
 local function escape_markup(text)
     if not text or #text == 0 then return "" end
     return text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;")
 end
 
-----------------------------------------------------------------------
--- Format text with YouTube Music musical note styling
-----------------------------------------------------------------------
 local function format_lyrics_markup(text)
     local esc = escape_markup(text)
     return string.format(
-        '<span foreground="#FF69B4" weight="bold">♪ </span>' ..
-        '<span foreground="#FFFFFF" weight="bold">%s</span>' ..
-        '<span foreground="#FF69B4" weight="bold"> ♪</span>',
+        '<span foreground="#EC5DA3" weight="bold">| </span>' ..
+        '<span foreground="#F8FAFC" weight="bold">%s</span>' ..
+        '<span foreground="#EC5DA3" weight="bold"> |</span>',
         esc
     )
 end
 
-----------------------------------------------------------------------
--- Measure text accurately with Pango
-----------------------------------------------------------------------
 local function measure_text(text, font_desc, max_content_w)
     local layout = PangoCairo.create_layout(measure_cr)
     layout:set_font_description(Pango.FontDescription.from_string(font_desc))
@@ -85,15 +70,12 @@ local function measure_text(text, font_desc, max_content_w)
     end
 end
 
-----------------------------------------------------------------------
--- Create the lyrics bubble window (once)
-----------------------------------------------------------------------
 local function ensure_window()
     if bubble_win then return end
 
     bubble_win = Gtk.Window {
         type = Gtk.WindowType.POPUP,
-        title = "YouTube Music Lyrics Bubble",
+        title = "Qwen Synced Lyrics Bubble",
         decorated = false,
         skip_taskbar_hint = true,
         skip_pager_hint = true,
@@ -104,12 +86,10 @@ local function ensure_window()
     bubble_win:set_keep_above(true)
     bubble_win:set_app_paintable(true)
 
-    -- RGBA visual for transparency
     local screen = bubble_win:get_screen()
     local visual = screen:get_rgba_visual()
     if visual then bubble_win:set_visual(visual) end
 
-    -- Click on bubble to dismiss / silence lyrics immediately
     bubble_win:add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
     bubble_win.on_button_press_event = function()
         lyrics_bubble.hide()
@@ -117,19 +97,15 @@ local function ensure_window()
     end
 end
 
-----------------------------------------------------------------------
--- Draw speech bubble with seamless tail pointing towards the widget
-----------------------------------------------------------------------
 local function draw_bubble(self, cr)
     local w = self:get_allocated_width()
     local h = self:get_allocated_height()
-    local r = 13
-    local tail_size = 12
-    local tail_half = 8
+    local r = 12
+    local tail_size = 11
+    local tail_half = 7
     local pad_x = 16
     local pad_y = 10
 
-    -- Clear background
     cr:set_operator(cairo.Operator.SOURCE)
     cr:set_source_rgba(0, 0, 0, 0)
     cr:paint()
@@ -139,19 +115,15 @@ local function draw_bubble(self, cr)
     local ty = current_ty or math.floor(h / 2)
     local t = math.max(0, math.min(1, current_opacity))
 
-    -- Subtle popup scale animation anchored at the tail tip
     local ease_scale = math.max(0.01, 1 - math.pow(1 - t, 3))
     cr:save()
     cr:translate(tx, ty)
     cr:scale(ease_scale, ease_scale)
     cr:translate(-tx, -ty)
 
-    -- Continuous path for body and tail without internal seam line
     cr:new_sub_path()
     if current_edge == "top" then
-        -- Tail on top edge pointing TOP/UP (⬆) towards avatar above
         local by = tail_size
-        local bh = h - tail_size
         cr:arc(r, by + r, r, math.pi, 3*math.pi/2)
         cr:line_to(tx - tail_half, by)
         cr:line_to(tx, 0)
@@ -161,7 +133,6 @@ local function draw_bubble(self, cr)
         cr:arc(r, h - r, r, math.pi/2, math.pi)
         cr:close_path()
     else
-        -- Default (bottom): Tail on bottom edge pointing BOTTOM/DOWN (⬇) towards avatar below
         local bh = h - tail_size
         cr:arc(r, r, r, math.pi, 3*math.pi/2)
         cr:arc(w - r, r, r, -math.pi/2, 0)
@@ -173,21 +144,18 @@ local function draw_bubble(self, cr)
         cr:close_path()
     end
 
-    -- Background fill with dark glass gradient
-    local bg = config.BG_LYRICS or { 0.08, 0.08, 0.15, 0.94 }
+    local bg = config.BG_LYRICS or { 0.07, 0.08, 0.14, 0.95 }
     local pat = cairo.Pattern.create_linear(0, 0, 0, h)
-    pat:add_color_stop_rgba(0, 0.11, 0.09, 0.20, (bg[4] or 0.94) * t)
-    pat:add_color_stop_rgba(1, 0.06, 0.05, 0.13, (bg[4] or 0.94) * t)
+    pat:add_color_stop_rgba(0, 0.09, 0.10, 0.17, (bg[4] or 0.95) * t)
+    pat:add_color_stop_rgba(1, 0.05, 0.06, 0.11, (bg[4] or 0.95) * t)
     cr:set_source(pat)
     cr:fill_preserve()
 
-    -- Neon pink accent border (#F472B6)
-    local border = config.BORDER_LYRICS or config.ACCENT_PINK or { 0.957, 0.447, 0.714, 0.85 }
+    local border = config.BORDER_LYRICS or config.ACCENT_PINK or { 0.925, 0.365, 0.640, 0.85 }
     cr:set_source_rgba(border[1], border[2], border[3], (border[4] or 0.85) * t)
     cr:set_line_width(1.3)
     cr:stroke()
 
-    -- Draw lyrics text inside
     if #current_text > 0 then
         local font_desc = config.FONT_LYRICS or "Sans Bold 11"
         local layout = PangoCairo.create_layout(cr)
@@ -218,9 +186,6 @@ local function draw_bubble(self, cr)
     return true
 end
 
-----------------------------------------------------------------------
--- Fade animation
-----------------------------------------------------------------------
 local function cancel_fade()
     if fade_timer then
         pcall(function() GLib.source_remove(fade_timer) end)
@@ -230,7 +195,7 @@ end
 
 local function animate_fade(direction, callback)
     local frame_ms = math.floor(1000 / (config.ANIM_FPS or 60))
-    local fade_dur = config.LYRICS_FADE_MS or 180
+    local fade_dur = config.LYRICS_FADE_MS or 160
     local step = frame_ms / fade_dur
 
     cancel_fade()
@@ -263,55 +228,40 @@ local function animate_fade(direction, callback)
     end)
 end
 
-----------------------------------------------------------------------
--- Calculate window dimensions and tail geometry for lyrics bubble
--- Positions are ALWAYS VERTICAL: ARRIBA (above avatar) or ABAJO (below avatar).
--- Arrow/tail ALWAYS points directly towards the avatar bubble circle.
-----------------------------------------------------------------------
 local function compute_geometry(wx, wy, bsize, snap_edge)
-    local max_w = config.LYRICS_MAX_W or 320
+    local max_w = config.LYRICS_MAX_W or 330
     local min_w = config.LYRICS_MIN_W or 130
     local pad_x = 16
     local pad_y = 10
-    local tail_size = 12
-    local gap = config.LYRICS_GAP or 6
-    local r = 13
-    local tail_half = 8
+    local tail_size = 11
+    local gap = config.LYRICS_GAP or 8
+    local r = 12
+    local tail_half = 7
 
     current_text_w, current_text_h, current_wrapped = measure_text(
         current_text, config.FONT_LYRICS or "Sans Bold 11", max_w)
 
     local bw = math.max(min_w, math.min(current_text_w + pad_x * 2, max_w + pad_x * 2))
-    local bh = math.max(42, current_text_h + pad_y * 2)
+    local bh = math.max(40, current_text_h + pad_y * 2)
 
-    local screen = Gdk.Screen.get_default()
-    local sw = screen:get_width()
-    local sh = screen:get_height()
-
+    local sw, sh = utils.screen_size()
     local win_w = bw
     local win_h = bh + tail_size
 
-    -- Center horizontally over the avatar circle
     local x = wx + (bsize - win_w) / 2
     x = math.max(8, math.min(x, sw - win_w - 8))
 
-    -- Target horizontal center of the avatar for the arrow tip
     local target_x = wx + math.floor(bsize / 2)
     local tx = target_x - x
     tx = math.max(r + tail_half + 2, math.min(tx, bw - r - tail_half - 2))
 
     local y, ty, edge
-    -- Positions are ALWAYS ARRIBA or ABAJO:
-    -- Prefer ARRIBA (above avatar) always. Only switch to ABAJO (below avatar)
-    -- if widget is docked or located at the top edge of screen where space above is lacking.
     if snap_edge == "top" or (wy - win_h - gap < 8) then
-        -- ABAJO (Below avatar): bubble is placed below, tail at top edge points UP (⬆) to avatar
         y = wy + bsize + gap
         y = math.max(8, math.min(y, sh - win_h - 8))
         ty = 0
         edge = "top"
     else
-        -- ARRIBA (Above avatar): bubble is placed above, tail at bottom edge points DOWN (⬇) to avatar
         y = wy - win_h - gap
         y = math.max(8, math.min(y, sh - win_h - 8))
         ty = win_h
@@ -321,9 +271,6 @@ local function compute_geometry(wx, wy, bsize, snap_edge)
     return math.floor(x), math.floor(y), win_w, win_h, edge, tx, ty
 end
 
-----------------------------------------------------------------------
--- Show or dynamically update the current lyrics line/paragraph
-----------------------------------------------------------------------
 function lyrics_bubble.show_line(text, wx, wy, bsize, snap_edge)
     if not text or #text == 0 then
         lyrics_bubble.hide()
@@ -350,10 +297,8 @@ function lyrics_bubble.show_line(text, wx, wy, bsize, snap_edge)
     bubble_win.on_draw = draw_bubble
 
     if current_opacity >= 0.9 and bubble_win:get_visible() then
-        -- Smooth dynamic update in place: redraw immediately without blink
         bubble_win:queue_draw()
     else
-        -- Fade in smoothly
         current_opacity = 0
         bubble_win:show_all()
         bubble_win:queue_draw()
@@ -361,9 +306,6 @@ function lyrics_bubble.show_line(text, wx, wy, bsize, snap_edge)
     end
 end
 
-----------------------------------------------------------------------
--- Reposition bubble during widget drag or snap
-----------------------------------------------------------------------
 function lyrics_bubble.reposition(wx, wy, bsize, snap_edge)
     last_wx = wx or last_wx
     last_wy = wy or last_wy
@@ -383,9 +325,6 @@ function lyrics_bubble.reposition(wx, wy, bsize, snap_edge)
     end
 end
 
-----------------------------------------------------------------------
--- Hide lyrics bubble smoothly
-----------------------------------------------------------------------
 function lyrics_bubble.hide()
     cancel_fade()
     if not bubble_win or current_opacity <= 0 then
@@ -400,9 +339,6 @@ function lyrics_bubble.hide()
     end)
 end
 
-----------------------------------------------------------------------
--- Check visibility
-----------------------------------------------------------------------
 function lyrics_bubble.is_visible()
     return current_opacity > 0
 end

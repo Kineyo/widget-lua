@@ -1,0 +1,171 @@
+name: Build and Release Qwen-Widget Packages
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Linux (Debian / Ubuntu / Pop!_OS .deb + Universal .tar.gz)
+  # ---------------------------------------------------------------------------
+  build-debian-and-universal:
+    name: Linux (.deb Pop!_OS/Debian & Universal .tar.gz)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ gcc make pkg-config \
+            libglib2.0-dev libx11-dev libxfixes-dev libxi-dev \
+            lua5.3 liblua5.3-dev lua-lgi gir1.2-gtk-3.0 curl unzip python3
+
+      - name: Fetch embedded llama.cpp runtime
+        run: |
+          mkdir -p bin lib/native
+          curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/b5092/llama-b5092-bin-ubuntu-x64.zip" -o /tmp/llama.zip
+          python3 -c "import zipfile; zipfile.ZipFile('/tmp/llama.zip').extractall('/tmp/llama_out')"
+          cp -f /tmp/llama_out/build/bin/llama-server bin/llama-server
+          chmod +x bin/llama-server
+          cp -a /tmp/llama_out/build/bin/lib*.so* lib/native/
+
+      - name: Build native C/C++ layer & generate .deb and .tar.gz
+        run: |
+          chmod +x scripts/build_packages.sh
+          ./scripts/build_packages.sh
+
+      - name: Upload Debian & Universal artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-and-tar
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # 2. Linux (Arch Linux .pkg.tar.zst + PKGBUILD)
+  # ---------------------------------------------------------------------------
+  build-archlinux:
+    name: Arch Linux (.pkg.tar.zst)
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install Arch dependencies
+        run: |
+          pacman -Syu --noconfirm git cmake gcc pkgconf lua53 lua53-lgi gtk3 glib2 libx11 libxfixes libxi curl unzip python
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Arch package (.pkg.tar.zst)
+        run: |
+          mkdir -p bin lib/native dist
+          curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/b5092/llama-b5092-bin-ubuntu-x64.zip" -o /tmp/llama.zip
+          python3 -c "import zipfile; zipfile.ZipFile('/tmp/llama.zip').extractall('/tmp/llama_out')"
+          cp -f /tmp/llama_out/build/bin/llama-server bin/llama-server
+          chmod +x bin/llama-server
+          cp -a /tmp/llama_out/build/bin/lib*.so* lib/native/
+          useradd -m builder && chown -R builder:builder .
+          su builder -c "cd packaging/arch && makepkg -f --nodeps"
+          cp packaging/arch/*.pkg.tar.zst dist/
+          cp packaging/arch/PKGBUILD dist/PKGBUILD
+
+      - name: Upload Arch Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arch
+          path: |
+            dist/*.pkg.tar.zst
+            dist/PKGBUILD
+
+  # ---------------------------------------------------------------------------
+  # 3. Windows (.exe NSIS Installer)
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Windows (.exe NSIS Installer)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure and compile C/C++ native modules
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+
+      - name: Build NSIS Installer (.exe)
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          makensis packaging/windows/installer.nsi
+
+      - name: Upload Windows Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/*.exe
+
+  # ---------------------------------------------------------------------------
+  # 4. macOS (.dmg & .pkg Native Installer)
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: macOS (.dmg & .pkg)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build C/C++ native layer & macOS DMG/PKG
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j4
+          chmod +x packaging/macos/build_dmg.sh
+          ./packaging/macos/build_dmg.sh
+
+      - name: Upload macOS Installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: |
+            dist/*.dmg
+            dist/*.pkg
+
+  # ---------------------------------------------------------------------------
+  # 5. Publish GitHub Release on Tag Push
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs:
+      - build-debian-and-universal
+      - build-archlinux
+      - build-windows
+      - build-macos
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/**/*.deb
+            release-assets/**/*.tar.gz
+            release-assets/**/*.pkg.tar.zst
+            release-assets/**/PKGBUILD
+            release-assets/**/*.exe
+            release-assets/**/*.dmg
+            release-assets/**/*.pkg
+          generate_release_notes: true

@@ -32,15 +32,31 @@ screenshots/
 qwen_image.jpg
 sync-to-github.sh
 
-# Compilación y binarios locales
+# Compilación, paquetes y binarios locales
+build/
+dist/
+lib/native/
 bin/lua5.3
+bin/llama-server
+bin/qwen-widget-bin
 lua-*/
 *.o
 *.a
 *.so
+*.so.*
+*.deb
+*.tar.gz
+*.pkg.tar.zst
+*.exe
+*.dmg
+*.pkg
 luac.out
 __pycache__/
 *.pyc
+models/*.gguf
+models/*.part
+*.gguf
+*.bin
 
 # Artefactos del sistema operativo
 .DS_Store

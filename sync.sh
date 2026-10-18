@@ -57,6 +57,17 @@ rsync -av --update \
     --exclude='capturas/' \
     --exclude='screenshots/' \
     --exclude='bin/lua5.3' \
+    --exclude='bin/llama-server' \
+    --exclude='bin/qwen-widget-bin' \
+    --exclude='build/' \
+    --exclude='dist/' \
+    --exclude='lib/native/' \
+    --exclude='*.so' \
+    --exclude='*.so.*' \
+    --exclude='models/*.gguf' \
+    --exclude='models/*.part' \
+    --exclude='*.gguf' \
+    --exclude='*.bin' \
     --exclude='.cache/' \
     --exclude='.vscode/' \
     --exclude='.idea/' \

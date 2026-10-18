@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------
-# qwen-widget  –  Launcher script for Qwen-Widget daemon
+# qwen-widget  –  Launcher script for Qwen-Widget v2.0 (Lua + C/C++)
 # ------------------------------------------------------------------
 set -euo pipefail
 
@@ -10,13 +10,13 @@ if [ ! -f "${WIDGET_DIR}/lib/main.lua" ]; then
     WIDGET_DIR="/opt/qwen-widget"
 fi
 
-# Lua 5.3 paths for LGI compatibility
-export LUA_PATH="/usr/share/lua/5.3/?.lua;/usr/share/lua/5.3/?/init.lua;${WIDGET_DIR}/lib/?.lua;;"
-export LUA_CPATH="/usr/lib/x86_64-linux-gnu/lua/5.3/?.so;/usr/lib/x86_64-linux-gnu/lua/5.3/?/corelgilua51.so;;"
+# Lua 5.3 paths for LGI + native C++ module (qwen_native.so)
+export LUA_PATH="/usr/share/lua/5.3/?.lua;/usr/share/lua/5.3/?/init.lua;${WIDGET_DIR}/lib/?.lua;${WIDGET_DIR}/?.lua;;"
+export LUA_CPATH="${WIDGET_DIR}/lib/?.so;/usr/lib/x86_64-linux-gnu/lua/5.3/?.so;/usr/lib/x86_64-linux-gnu/lua/5.3/?/corelgilua51.so;/usr/lib/lua/5.3/?.so;;"
 
 # Find lua5.3 binary
 LUA_BIN=""
-for candidate in "/opt/qwen-widget/bin/lua5.3" "${WIDGET_DIR}/bin/lua5.3" "$HOME/.local/bin/lua5.3" /usr/bin/lua5.3 /usr/local/bin/lua5.3; do
+for candidate in "${WIDGET_DIR}/bin/lua5.3" "/opt/qwen-widget/bin/lua5.3" "$HOME/.local/bin/lua5.3" /usr/bin/lua5.3 /usr/local/bin/lua5.3; do
     if [ -x "$candidate" ]; then
         LUA_BIN="$candidate"
         break
@@ -28,12 +28,18 @@ if [ -z "$LUA_BIN" ]; then
     exit 1
 fi
 
-# Kill any existing instance
+# Kill any existing widget instance and stale embedded llama-server if restarting
 pkill -f "lua.*main.lua" 2>/dev/null || true
-sleep 0.3
+sleep 0.25
 
 export QWEN_WIDGET_DIR="$WIDGET_DIR"
+export QWEN_WIDGET_ROOT="$WIDGET_DIR"
 export GDK_BACKEND=x11
+export LD_LIBRARY_PATH="${WIDGET_DIR}/lib/native:${WIDGET_DIR}/lib:$HOME/.local/lib:${LD_LIBRARY_PATH:-}"
 
-# Run the widget
-exec "$LUA_BIN" "${WIDGET_DIR}/lib/main.lua" "$@"
+# Run via native binary launcher if available, else direct lua5.3
+if [ -x "${WIDGET_DIR}/bin/qwen-widget-bin" ]; then
+    exec "${WIDGET_DIR}/bin/qwen-widget-bin" "$@"
+else
+    exec "$LUA_BIN" "${WIDGET_DIR}/lib/main.lua" "$@"
+fi
