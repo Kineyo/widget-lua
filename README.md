@@ -6,6 +6,8 @@
 [![AI Engine: Embedded llama.cpp + Cloud API](https://img.shields.io/badge/AI-llama.cpp%20%28GGUF%29%20%2B%20Cloud%20API-10a37f.svg?style=flat-square)](#motor-de-inferencia-llamacpp-embebido--cloud-api)
 [![RAM Budget: <= 500 MB](https://img.shields.io/badge/RAM%20Budget-%E2%89%A4%20500%20MB%20Strict-2ea44f.svg?style=flat-square)](#arquitectura-hibrida-lua--cc-y-presupuesto-de-ram--500-mb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![GitHub Actions CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF.svg?style=flat-square&logo=githubactions&logoColor=white)](.github/workflows/release.yml)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openclaw/qwen-widget/blob/main/colab_build_release.ipynb)
 
 Widget de escritorio hibrido (**Lua 5.3 + C/C++17**), autonomo y ultraligero con motor de inferencia local **`llama.cpp` embebido** (y soporte nativo para **Cloud API**), **Corrector Gramatical Instantaneo por Hooks Nativos de Seleccion**, **Mini-Reproductor Unificado para YouTube Music y Spotify** con **Letras Sincronizadas (Karaoke LRC)** y **Agente Autonomo OpenClaw** asincrono. Disenado bajo un presupuesto estricto de memoria **menor o igual a 500 MB de RAM**.
 
@@ -125,6 +127,33 @@ cd qwen-widget
    cd qwen-widget-2.0.0
    ./bin/qwen-widget
    ```
+</details>
+
+<details>
+<summary><b>> Google Colab (Compilacion en la Nube con 1 Clic);</b></summary>
+
+Puedes compilar todos los releases (.deb y .tar.gz) en la nube utilizando las maquinas virtuales gratuitas de Google Colab sin consumir recursos locales:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openclaw/qwen-widget/blob/main/colab_build_release.ipynb)
+
+1. Abre el notebook [colab_build_release.ipynb](file:///home/alex/Documentos/widget%20%5BGithub%5D/colab_build_release.ipynb) en Google Colab.
+2. Ejecuta las celdas secuencialmente (soporta CPU y aceleracion NVIDIA GPU CUDA 12).
+3. Elige tu metodo de exportacion:
+   - Descarga directa al navegador de los paquetes compilados y sumas SHA256.
+   - Guardado directo en tu Google Drive.
+   - Publicacion automatica en GitHub Releases mediante API token.
+</details>
+
+<details>
+<summary><b>> GitHub Actions (Compilacion y Releases Automaticos);</b></summary>
+
+Cada vez que se suben cambios al repositorio (`push` a `main` o tags `v*`), el flujo de trabajo en [.github/workflows/release.yml](file:///home/alex/Documentos/widget%20%5BGithub%5D/.github/workflows/release.yml) compila automaticamente en matrices de maquinas virtuales:
+- **Ubuntu Linux (x86_64)**: Paquete Debian `.deb` y Universal Portable `.tar.gz`.
+- **Arch Linux (Contenedor base-devel)**: Paquete `.pkg.tar.zst` y PKGBUILD.
+- **Windows Server (x64)**: Instalador ejecutable `.exe` (NSIS) y portable `.zip`.
+- **macOS (arm64 Metal)**: Instaladores `.dmg` y `.pkg`.
+
+Los artefactos se publican y actualizan de forma continua en la seccion **Releases** y quedan almacenados como artefactos descargables del workflow.
 </details>
 
 ---

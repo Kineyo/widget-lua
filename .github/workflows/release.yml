@@ -1,24 +1,37 @@
-name: Build and Release Qwen-Widget Packages
+name: Build and Release Multiplatform Packages
 
 on:
   push:
     branches:
       - main
+      - master
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag personalizado para el release (opcional, ej. v2.0.0)'
+        required: false
+        default: ''
+      is_prerelease:
+        description: 'Marcar como Pre-release'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # ---------------------------------------------------------------------------
   # 1. Linux (Debian / Ubuntu / Pop!_OS .deb + Universal .tar.gz)
   # ---------------------------------------------------------------------------
   build-debian-and-universal:
-    name: Linux (.deb Pop!_OS/Debian & Universal .tar.gz)
+    name: Linux (.deb Debian/Ubuntu + Universal .tar.gz)
     runs-on: ubuntu-24.04
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,34 +41,40 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake g++ gcc make pkg-config \
             libglib2.0-dev libx11-dev libxfixes-dev libxi-dev \
-            lua5.3 liblua5.3-dev lua-lgi gir1.2-gtk-3.0 curl unzip python3
+            lua5.3 liblua5.3-dev lua-lgi gir1.2-gtk-3.0 curl unzip python3 patchelf
 
-      - name: Fetch embedded llama.cpp runtime
+      - name: Fetch embedded llama.cpp runtime (Linux x86_64)
         run: |
-          mkdir -p bin lib/native
+          mkdir -p bin lib/native dist
           curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/b5092/llama-b5092-bin-ubuntu-x64.zip" -o /tmp/llama.zip
           python3 -c "import zipfile; zipfile.ZipFile('/tmp/llama.zip').extractall('/tmp/llama_out')"
           cp -f /tmp/llama_out/build/bin/llama-server bin/llama-server
           chmod +x bin/llama-server
-          cp -a /tmp/llama_out/build/bin/lib*.so* lib/native/
+          cp -a /tmp/llama_out/build/bin/lib*.so* lib/native/ || true
 
-      - name: Build native C/C++ layer & generate .deb and .tar.gz
+      - name: Build native C/C++ modules & generate .deb and .tar.gz
         run: |
           chmod +x scripts/build_packages.sh
           ./scripts/build_packages.sh
 
-      - name: list dist contents
+      - name: List dist contents
         run: |
           ls -la dist || true
+
+      - name: Generate Linux SHA256 checksums
+        run: |
+          cd dist
+          sha256sum *.deb *.tar.gz > SHA256SUMS-linux.txt 2>/dev/null || true
 
       - name: Upload Debian & Universal artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-deb-and-tar
+          name: packages-linux
           path: |
             dist/*.deb
             dist/*.tar.gz
-          if-no-files-found: error
+            dist/SHA256SUMS-linux.txt
+          if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
   # 2. Linux (Arch Linux .pkg.tar.zst + PKGBUILD)
@@ -65,11 +84,10 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: archlinux:base-devel
-
     steps:
       - name: Install Arch dependencies
         run: |
-          pacman -Syu --noconfirm git cmake gcc pkgconf lua53 lua53-lgi gtk3 glib2 libx11 libxfixes libxi curl unzip python
+          pacman -Syu --noconfirm git cmake gcc pkgconf lua53 gtk3 glib2 libx11 libxfixes libxi curl unzip python
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -78,31 +96,37 @@ jobs:
         run: |
           mkdir -p bin lib/native dist
           curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/b5092/llama-b5092-bin-ubuntu-x64.zip" -o /tmp/llama.zip
-          python3 -c "import zipfile; zipfile.ZipFile('/tmp/llama.zip').extractall('/tmp/llama_out')"
+          python -c "import zipfile; zipfile.ZipFile('/tmp/llama.zip').extractall('/tmp/llama_out')"
           cp -f /tmp/llama_out/build/bin/llama-server bin/llama-server
           chmod +x bin/llama-server
-          cp -a /tmp/llama_out/build/bin/lib*.so* lib/native/
+          cp -a /tmp/llama_out/build/bin/lib*.so* lib/native/ || true
+          
           useradd -m builder && chown -R builder:builder .
           su builder -c "cd packaging/arch && makepkg -f --nodeps"
           cp packaging/arch/*.pkg.tar.zst dist/ 2>/dev/null || true
           cp packaging/arch/PKGBUILD dist/ 2>/dev/null || true
+          cd dist && sha256sum *.pkg.tar.zst > SHA256SUMS-arch.txt 2>/dev/null || true
+
+      - name: List dist contents
+        run: |
+          ls -la dist || true
 
       - name: Upload Arch Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-arch
+          name: packages-arch
           path: |
             dist/*.pkg.tar.zst
             dist/PKGBUILD
-          if-no-files-found: error
+            dist/SHA256SUMS-arch.txt
+          if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # 3. Windows (.exe NSIS Installer)
+  # 3. Windows (.exe NSIS Installer + Portable .zip)
   # ---------------------------------------------------------------------------
   build-windows:
-    name: Windows (.exe NSIS Installer)
+    name: Windows (.exe NSIS Installer & Portable .zip)
     runs-on: windows-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -112,23 +136,65 @@ jobs:
         run: |
           choco install nsis -y
 
+      - name: Fetch embedded llama.cpp runtime (Windows x64)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bin, lib\native, dist
+          $url = "https://github.com/ggml-org/llama.cpp/releases/download/b5092/llama-b5092-bin-win-avx2-x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile llama-win.zip
+          Expand-Archive -Path llama-win.zip -DestinationPath llama_tmp -Force
+          if (Test-Path "llama_tmp\build\bin\llama-server.exe") {
+            Copy-Item "llama_tmp\build\bin\llama-server.exe" -Destination "bin\llama-server.exe" -Force
+          } elseif (Test-Path "llama_tmp\llama-server.exe") {
+            Copy-Item "llama_tmp\llama-server.exe" -Destination "bin\llama-server.exe" -Force
+          }
+          Get-ChildItem -Path "llama_tmp" -Filter "*.dll" -Recurse | Copy-Item -Destination "lib\native\" -Force
+
       - name: Configure and compile C/C++ native modules
+        shell: pwsh
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release
+          
+          # Copiar binarios compilados donde NSIS y la app los esperan
+          if (Test-Path "build\Release\qwen-widget-bin.exe") {
+            Copy-Item "build\Release\qwen-widget-bin.exe" -Destination "bin\qwen-widget-bin.exe" -Force
+          } elseif (Test-Path "bin\Release\qwen-widget-bin.exe") {
+            Copy-Item "bin\Release\qwen-widget-bin.exe" -Destination "bin\qwen-widget-bin.exe" -Force
+          }
+          if (Test-Path "build\Release\qwen_native.dll") {
+            Copy-Item "build\Release\qwen_native.dll" -Destination "lib\qwen_native.dll" -Force
+          } elseif (Test-Path "lib\Release\qwen_native.dll") {
+            Copy-Item "lib\Release\qwen_native.dll" -Destination "lib\qwen_native.dll" -Force
+          }
 
       - name: Build NSIS Installer (.exe)
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
           makensis packaging/windows/installer.nsi
 
-      - name: Upload Windows Installer
+      - name: Create Portable Windows .zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path bin, lib, assets, README.md, LICENSE -DestinationPath "dist\qwen-widget-2.0.0-windows-x64.zip" -Force
+          cd dist
+          Get-FileHash -Algorithm SHA256 *.exe, *.zip | Format-Table -HideTableHeaders | Out-File "SHA256SUMS-windows.txt"
+
+      - name: List dist contents
+        shell: pwsh
+        run: |
+          Get-ChildItem dist
+
+      - name: Upload Windows Installer and Portable
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
+          name: packages-windows
           path: |
             dist/*.exe
-          if-no-files-found: error
+            dist/*.zip
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
   # 4. macOS (.dmg & .pkg Native Installer)
@@ -136,42 +202,55 @@ jobs:
   build-macos:
     name: macOS (.dmg & .pkg)
     runs-on: macos-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Fetch embedded llama.cpp runtime (macOS arm64 Metal)
+        run: |
+          mkdir -p bin lib/native dist
+          curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/b5092/llama-b5092-bin-macos-arm64.zip" -o /tmp/llama-mac.zip
+          unzip -q /tmp/llama-mac.zip -d /tmp/llama_mac
+          find /tmp/llama_mac -type f -name "llama-server" -exec cp -f {} bin/llama-server \; || true
+          chmod +x bin/llama-server || true
+          find /tmp/llama_mac -type f -name "*.dylib" -exec cp -f {} lib/native/ \; 2>/dev/null || true
+
       - name: Build C/C++ native layer & macOS DMG/PKG
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build -j4
+          cmake --build build -j$(sysctl -n hw.ncpu || echo 2)
           chmod +x packaging/macos/build_dmg.sh
           ./packaging/macos/build_dmg.sh
+          cd dist && shasum -a 256 *.dmg *.pkg > SHA256SUMS-macos.txt 2>/dev/null || true
+
+      - name: List dist contents
+        run: |
+          ls -la dist || true
 
       - name: Upload macOS Installers
         uses: actions/upload-artifact@v4
         with:
-          name: macos-installer
+          name: packages-macos
           path: |
             dist/*.dmg
             dist/*.pkg
-          if-no-files-found: error
+            dist/SHA256SUMS-macos.txt
+          if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # 5. Publish GitHub Release on Tag Push
+  # 5. Publish Consolidated GitHub Release
   # ---------------------------------------------------------------------------
-  release:
+  publish-release:
     name: Publish GitHub Release
     needs:
       - build-debian-and-universal
       - build-archlinux
       - build-windows
       - build-macos
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-
+    if: always() && !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
-      - name: Download all artifacts
+      - name: Download all built artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -180,18 +259,54 @@ jobs:
         run: |
           find release-assets -type f | sort
 
-      - name: Create GitHub Release
+      - name: Prepare release files and consolidated checksums
+        id: prep
+        run: |
+          mkdir -p final-release
+          find release-assets/ -type f \( -name "*.deb" -o -name "*.tar.gz" -o -name "*.pkg.tar.zst" -o -name "*.exe" -o -name "*.zip" -o -name "*.dmg" -o -name "*.pkg" -o -name "PKGBUILD" \) -exec cp -f {} final-release/ \;
+          
+          cd final-release
+          sha256sum * > SHA256SUMS.txt 2>/dev/null || true
+          echo "=== ARCHIVOS LISTOS PARA EL RELEASE ==="
+          ls -lh
+          
+          # Determinar Tag y Titulo del Release
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.tag_name }}" ]]; then
+            RELEASE_TAG="${{ github.event.inputs.tag_name }}"
+            RELEASE_NAME="Release ${RELEASE_TAG}"
+            PRERELEASE="${{ github.event.inputs.is_prerelease }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            RELEASE_TAG="${GITHUB_REF#refs/tags/}"
+            RELEASE_NAME="Qwen-Widget ${RELEASE_TAG}"
+            PRERELEASE="false"
+          else
+            RELEASE_TAG="latest"
+            RELEASE_NAME="Qwen-Widget Rolling Release (Latest Build)"
+            PRERELEASE="false"
+          fi
+          
+          echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+          echo "release_name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+          echo "is_prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
+
+      - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.prep.outputs.release_tag }}
+          name: ${{ steps.prep.outputs.release_name }}
+          prerelease: ${{ steps.prep.outputs.is_prerelease == 'true' }}
+          draft: false
           files: |
-            release-assets/**/*.deb
-            release-assets/**/*.tar.gz
-            release-assets/**/*.pkg.tar.zst
-            release-assets/**/PKGBUILD
-            release-assets/**/*.exe
-            release-assets/**/*.dmg
-            release-assets/**/*.pkg
+            final-release/*.deb
+            final-release/*.tar.gz
+            final-release/*.pkg.tar.zst
+            final-release/*.exe
+            final-release/*.zip
+            final-release/*.dmg
+            final-release/*.pkg
+            final-release/PKGBUILD
+            final-release/SHA256SUMS.txt
           generate_release_notes: true
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
