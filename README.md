@@ -6,8 +6,7 @@
 [![AI Engine: Embedded llama.cpp + Cloud API](https://img.shields.io/badge/AI-llama.cpp%20%28GGUF%29%20%2B%20Cloud%20API-10a37f.svg?style=flat-square)](#motor-de-inferencia-llamacpp-embebido--cloud-api)
 [![RAM Budget: <= 500 MB](https://img.shields.io/badge/RAM%20Budget-%E2%89%A4%20500%20MB%20Strict-2ea44f.svg?style=flat-square)](#arquitectura-hibrida-lua--cc-y-presupuesto-de-ram--500-mb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
-[![GitHub Actions CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF.svg?style=flat-square&logo=githubactions&logoColor=white)](.github/workflows/release.yml)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openclaw/qwen-widget/blob/main/colab_build_release.ipynb)
+
 
 Widget de escritorio hibrido (**Lua 5.3 + C/C++17**), autonomo y ultraligero con motor de inferencia local **`llama.cpp` embebido** (y soporte nativo para **Cloud API**), **Corrector Gramatical Instantaneo por Hooks Nativos de Seleccion**, **Mini-Reproductor Unificado para YouTube Music y Spotify** con **Letras Sincronizadas (Karaoke LRC)** y **Agente Autonomo OpenClaw** asincrono. Disenado bajo un presupuesto estricto de memoria **menor o igual a 500 MB de RAM**.
 
