@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -18,6 +18,7 @@ jobs:
   build-debian-and-universal:
     name: Linux (.deb Pop!_OS/Debian & Universal .tar.gz)
     runs-on: ubuntu-24.04
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -43,6 +44,10 @@ jobs:
           chmod +x scripts/build_packages.sh
           ./scripts/build_packages.sh
 
+      - name: list dist contents
+        run: |
+          ls -la dist || true
+
       - name: Upload Debian & Universal artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -50,6 +55,7 @@ jobs:
           path: |
             dist/*.deb
             dist/*.tar.gz
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # 2. Linux (Arch Linux .pkg.tar.zst + PKGBUILD)
@@ -59,6 +65,7 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: archlinux:base-devel
+
     steps:
       - name: Install Arch dependencies
         run: |
@@ -77,8 +84,8 @@ jobs:
           cp -a /tmp/llama_out/build/bin/lib*.so* lib/native/
           useradd -m builder && chown -R builder:builder .
           su builder -c "cd packaging/arch && makepkg -f --nodeps"
-          cp packaging/arch/*.pkg.tar.zst dist/
-          cp packaging/arch/PKGBUILD dist/PKGBUILD
+          cp packaging/arch/*.pkg.tar.zst dist/ 2>/dev/null || true
+          cp packaging/arch/PKGBUILD dist/ 2>/dev/null || true
 
       - name: Upload Arch Linux artifacts
         uses: actions/upload-artifact@v4
@@ -87,6 +94,7 @@ jobs:
           path: |
             dist/*.pkg.tar.zst
             dist/PKGBUILD
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # 3. Windows (.exe NSIS Installer)
@@ -94,9 +102,15 @@ jobs:
   build-windows:
     name: Windows (.exe NSIS Installer)
     runs-on: windows-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install NSIS
+        shell: powershell
+        run: |
+          choco install nsis -y
 
       - name: Configure and compile C/C++ native modules
         run: |
@@ -112,7 +126,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: dist/*.exe
+          path: |
+            dist/*.exe
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # 4. macOS (.dmg & .pkg Native Installer)
@@ -120,6 +136,7 @@ jobs:
   build-macos:
     name: macOS (.dmg & .pkg)
     runs-on: macos-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -138,6 +155,7 @@ jobs:
           path: |
             dist/*.dmg
             dist/*.pkg
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # 5. Publish GitHub Release on Tag Push
@@ -151,11 +169,16 @@ jobs:
       - build-macos
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
+
+      - name: Show downloaded assets
+        run: |
+          find release-assets -type f | sort
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -169,3 +192,6 @@ jobs:
             release-assets/**/*.dmg
             release-assets/**/*.pkg
           generate_release_notes: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
